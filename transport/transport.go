@@ -1,12 +1,9 @@
 package transport
 
 import (
-	"errors"
 	"log"
 	"net"
 	"sync"
-
-	apTransport "github.com/iotaledger/autopeering-sim/transport"
 )
 
 // TransportConn wraps a TCPConn my un-/marshaling the packets using protobuf.
@@ -15,12 +12,12 @@ type TransportTCP struct {
 	connections     map[string]*net.TCPConn
 	lock            sync.RWMutex
 	socket          *net.TCPListener
-	receive         chan Transfer
+	receive         chan *transfer
 	shutdownChannel chan struct{}
 	shutdownGroup   *sync.WaitGroup
 }
 
-type Transfer struct {
+type transfer struct {
 	from string
 	data []byte
 }
@@ -31,22 +28,15 @@ type TCPConfig struct {
 	MaxMessageSize int
 	// Controls the ability to enable logging errors occurring in the library
 	EnableLogging bool
-	// The local address to listen for incoming connections on. Typically, you exclude
-	// the ip, and just provide port, ie: ":5031"
+	// The local address to listen for incoming connections on.
 	Address string
-	// The callback to invoke once a full set of message bytes has been received. It
-	// is your responsibility to handle parsing the incoming message and handling errors
-	// inside the callback
-	Callback ListenCallback
 }
-
-type ListenCallback func([]byte) error
 
 // NewTransportTCP creates a new transport layer by using the underlying TCPConn.
 func NewTransportTCP(cfg TCPConfig) (*TransportTCP, error) {
 	t := &TransportTCP{
 		connections:     make(map[string]*net.TCPConn),
-		receive:         make(chan Transfer, 100),
+		receive:         make(chan *transfer, 100),
 		cfg:             cfg,
 		shutdownChannel: make(chan struct{}),
 		shutdownGroup:   &sync.WaitGroup{},
@@ -65,11 +55,11 @@ func NewTransportTCP(cfg TCPConfig) (*TransportTCP, error) {
 
 // ReadFrom implements the Transport ReadFrom method.
 func (t *TransportTCP) ReadFrom() ([]byte, string, error) {
-	b := make([]byte, apTransport.MaxPacketSize)
+	b := make([]byte, t.cfg.MaxMessageSize)
 	select {
 	case rcv := <-t.receive:
-		copy(b, rcv.data)
-		return b, rcv.from, nil
+		n := copy(b, rcv.data)
+		return b[:n], rcv.from, nil
 	default:
 		return nil, "", nil
 	}
@@ -77,28 +67,22 @@ func (t *TransportTCP) ReadFrom() ([]byte, string, error) {
 
 // WriteTo implements the Transport WriteTo method.
 func (t *TransportTCP) WriteTo(pkt []byte, address string) error {
-	var c *net.TCPConn
-	var ok bool
+	t.lock.RLock()
+	// if the connection is not yet established, dial first
+	if _, ok := t.connections[address]; !ok {
+		t.lock.RUnlock()
+		err := t.connect(address)
+		if err != nil {
+			return err
+		}
+	} else {
+		t.lock.RUnlock()
+	}
 
 	t.lock.RLock()
 	defer t.lock.RUnlock()
-
-	if c, ok = t.connections[address]; !ok {
-		return errors.New("connection not opened")
-	}
-
-	_, err := c.Write(pkt)
+	_, err := t.connections[address].Write(pkt)
 	return err
-}
-
-// LocalAddr returns the local network address.
-func (t *TransportTCP) LocalAddr() net.Addr {
-	return t.socket.Addr()
-}
-
-// StartListening represents a way to start accepting TCP connections as blocking
-func (t *TransportTCP) StartListening() error {
-	return t.blockListen()
 }
 
 // Close represents a way to signal to the Listener that it should no longer accept
@@ -111,6 +95,33 @@ func (t *TransportTCP) Close() {
 	for _, c := range t.connections {
 		c.Close()
 	}
+}
+
+// LocalAddr returns the local network address.
+func (t *TransportTCP) LocalAddr() net.Addr {
+	return t.socket.Addr()
+}
+
+// connect opens a connection and starts a read loop on the connection
+func (t *TransportTCP) connect(address string) error {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	if err != nil {
+		return err
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	t.connections[address] = conn
+	go t.readLoop(conn)
+	return err
+}
+
+// StartListening represents a way to start accepting TCP connections as blocking
+func (t *TransportTCP) StartListening() error {
+	return t.blockListen()
 }
 
 // StartListeningAsync represents a way to start accepting TCP connections as non-blocking
@@ -128,9 +139,6 @@ func (t *TransportTCP) blockListen() error {
 	for {
 		// Wait for someone to connect
 		c, err := t.socket.AcceptTCP()
-
-		// Don't dial out, wrap the underlying conn in one of ours
-		//conn.socket = c
 		if err != nil {
 			if t.cfg.EnableLogging {
 				log.Printf("Error attempting to accept connection: %s", err)
@@ -146,6 +154,9 @@ func (t *TransportTCP) blockListen() error {
 			}
 		} else {
 			// Hand this off and immediately listen for more
+			t.lock.Lock()
+			t.connections[c.RemoteAddr().String()] = c
+			t.lock.Unlock()
 			go t.readLoop(c)
 		}
 	}
@@ -172,9 +183,10 @@ func (t *TransportTCP) readLoop(conn *net.TCPConn) {
 		}
 		// We send the received data to the receive channel
 		select {
-		case t.receive <- Transfer{
+		case t.receive <- &transfer{
 			from: conn.RemoteAddr().String(),
-			data: dataBuffer[:msgLen]}:
+			data: dataBuffer[:msgLen],
+		}:
 			continue
 		case <-t.shutdownChannel:
 			conn.Close()
