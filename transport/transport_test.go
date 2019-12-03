@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"fmt"
 	"net"
 	"testing"
 
@@ -12,7 +11,7 @@ import (
 func dummyConf(addr string) TCPConfig {
 	return TCPConfig{
 		MaxMessageSize: 1000,
-		EnableLogging:  true,
+		EnableLogging:  false,
 		Address:        addr,
 	}
 }
@@ -71,12 +70,12 @@ func TestABConnection(t *testing.T) {
 	ipReceived, _, _ = net.SplitHostPort(from)
 	assert.Equal(t, ipB, ipReceived)
 
-	fmt.Println("A connections: ", len(A.connections))
-	fmt.Println("B connections: ", len(B.connections))
+	assert.Equal(t, 1, len(A.connections))
+	assert.Equal(t, 1, len(B.connections))
 
 	A.Close()
 	B.Close()
 
-	fmt.Println("A connections: ", len(A.connections))
-	fmt.Println("B connections: ", len(B.connections))
+	assert.Equal(t, 0, len(A.connections))
+	assert.Equal(t, 0, len(B.connections))
 }
