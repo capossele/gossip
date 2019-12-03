@@ -11,10 +11,9 @@ type TransportTCP struct {
 	cfg             TCPConfig
 	connections     map[string]*net.TCPConn
 	lock            sync.RWMutex
-	socket          *net.TCPListener
+	listener        *net.TCPListener
 	receive         chan *transfer
 	shutdownChannel chan struct{}
-	shutdownGroup   *sync.WaitGroup
 }
 
 type transfer struct {
@@ -30,6 +29,8 @@ type TCPConfig struct {
 	EnableLogging bool
 	// The local address to listen for incoming connections on.
 	Address string
+	// Receive buffer
+	Buffer int
 }
 
 // NewTransportTCP creates a new transport layer by using the underlying TCPConn.
@@ -39,7 +40,9 @@ func NewTransportTCP(cfg TCPConfig) (*TransportTCP, error) {
 		receive:         make(chan *transfer, 100),
 		cfg:             cfg,
 		shutdownChannel: make(chan struct{}),
-		shutdownGroup:   &sync.WaitGroup{},
+	}
+	if cfg.Buffer > 0 {
+		t.receive = make(chan *transfer, cfg.Buffer)
 	}
 	tcpAddr, err := net.ResolveTCPAddr("tcp", t.cfg.Address)
 	if err != nil {
@@ -49,7 +52,7 @@ func NewTransportTCP(cfg TCPConfig) (*TransportTCP, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.socket = receiveSocket
+	t.listener = receiveSocket
 	return t, nil
 }
 
@@ -65,6 +68,7 @@ func (t *TransportTCP) ReadFrom() ([]byte, string, error) {
 	}
 }
 
+// TODO: refactor and add new addConnection / addPeer
 // WriteTo implements the Transport WriteTo method.
 func (t *TransportTCP) WriteTo(pkt []byte, address string) error {
 	t.lock.RLock()
@@ -111,7 +115,7 @@ func (t *TransportTCP) CloseConn(address string) {
 
 // LocalAddr returns the local network address.
 func (t *TransportTCP) LocalAddr() net.Addr {
-	return t.socket.Addr()
+	return t.listener.Addr()
 }
 
 // connect opens a connection and starts a read loop on the connection
@@ -145,19 +149,17 @@ func (t *TransportTCP) StartListeningAsync() error {
 	return err
 }
 
+// TODO: filter allowed addresses already from here
 // Actually blocks the thread it's running on, and begins handling incoming
 // requests
 func (t *TransportTCP) blockListen() error {
 	for {
 		// Wait for someone to connect
-		c, err := t.socket.AcceptTCP()
+		c, err := t.listener.AcceptTCP()
 		if err != nil {
 			if t.cfg.EnableLogging {
 				log.Printf("Error attempting to accept connection: %s", err)
 			}
-			// Stole this approach from http://zhen.org/blog/graceful-shutdown-of-go-net-dot-listeners/
-			// Benefits of a channel for the simplicity of use, but don't have to even check it
-			// unless theres an error, so performance impact to incoming conns should be lower
 			select {
 			case <-t.shutdownChannel:
 				return nil
@@ -183,6 +185,7 @@ func (t *TransportTCP) readLoop(conn *net.TCPConn) {
 	// If there is any error, close the connection and break out of the read-loop.
 	for {
 		msgLen, err := conn.Read(dataBuffer)
+		// TODO: check if getting temporary errors (see server of autopeering)
 		if err != nil {
 			if t.cfg.EnableLogging {
 				log.Printf("Address %s: Failure to read from connection. Underlying error: %s", conn.RemoteAddr(), err)

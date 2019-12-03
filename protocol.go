@@ -31,6 +31,7 @@ func sendRequest(p *Protocol, to *peer.Peer) error {
 	return nil
 }
 
+// TODO: use peer retrieveSignature instead ed25519
 func verifyRequest(p *Protocol, msg *pb.ConnectionRequest, signature []byte) error {
 	requester, ok := p.neighbors[msg.GetFrom()]
 	if !ok {

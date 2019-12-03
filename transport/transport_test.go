@@ -16,8 +16,9 @@ func dummyConf(addr string) TCPConfig {
 	}
 }
 func TestNewTransportTCP(t *testing.T) {
-	_, err := NewTransportTCP(dummyConf("127.0.0.1:8080"))
+	A, err := NewTransportTCP(dummyConf("127.0.0.1:8080"))
 	require.NoError(t, err)
+	A.Close()
 }
 
 func TestABConnection(t *testing.T) {
