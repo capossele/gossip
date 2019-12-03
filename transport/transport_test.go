@@ -52,10 +52,10 @@ func TestABConnection(t *testing.T) {
 	assert.Equal(t, []byte(msg), rcv)
 
 	ipA, _, _ := net.SplitHostPort(addrA)
-	ipReceived, _, _ := net.SplitHostPort(from)
+	ipReceived, port, _ := net.SplitHostPort(from)
 	assert.Equal(t, ipA, ipReceived)
 
-	err = B.WriteTo([]byte(msg), addrA)
+	err = B.WriteTo([]byte(msg), ipReceived+":"+port)
 	require.NoError(t, err)
 
 	for {
@@ -70,6 +70,12 @@ func TestABConnection(t *testing.T) {
 	ipB, _, _ := net.SplitHostPort(addrB)
 	ipReceived, _, _ = net.SplitHostPort(from)
 	assert.Equal(t, ipB, ipReceived)
+
+	fmt.Println("A connections: ", len(A.connections))
+	fmt.Println("B connections: ", len(B.connections))
+
+	A.Close()
+	B.Close()
 
 	fmt.Println("A connections: ", len(A.connections))
 	fmt.Println("B connections: ", len(B.connections))

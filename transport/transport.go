@@ -89,11 +89,23 @@ func (t *TransportTCP) WriteTo(pkt []byte, address string) error {
 // incoming connections, and begin to shutdown.
 func (t *TransportTCP) Close() {
 	close(t.shutdownChannel)
-	t.shutdownGroup.Wait()
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	for _, c := range t.connections {
+	for k, c := range t.connections {
 		c.Close()
+		delete(t.connections, k)
+	}
+}
+
+// Close represents a way to signal to the Listener that it should no longer accept
+// incoming connections, and begin to shutdown.
+func (t *TransportTCP) CloseConn(address string) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	// if the connection is not yet established, dial first
+	if _, ok := t.connections[address]; ok {
+		t.connections[address].Close()
+		delete(t.connections, address)
 	}
 }
 
@@ -164,9 +176,6 @@ func (t *TransportTCP) blockListen() error {
 
 // Handles incoming data over a given connection.
 func (t *TransportTCP) readLoop(conn *net.TCPConn) {
-	// Increment the waitGroup in the event of a shutdown
-	t.shutdownGroup.Add(1)
-	defer t.shutdownGroup.Done()
 	// dataBuffer will hold the message from each read
 	dataBuffer := make([]byte, t.cfg.MaxMessageSize)
 
@@ -178,7 +187,7 @@ func (t *TransportTCP) readLoop(conn *net.TCPConn) {
 			if t.cfg.EnableLogging {
 				log.Printf("Address %s: Failure to read from connection. Underlying error: %s", conn.RemoteAddr(), err)
 			}
-			conn.Close()
+			t.CloseConn(conn.RemoteAddr().String())
 			return
 		}
 		// We send the received data to the receive channel
@@ -189,7 +198,7 @@ func (t *TransportTCP) readLoop(conn *net.TCPConn) {
 		}:
 			continue
 		case <-t.shutdownChannel:
-			conn.Close()
+			t.CloseConn(conn.RemoteAddr().String())
 			return
 		}
 	}
