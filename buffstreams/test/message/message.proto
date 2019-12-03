@@ -1,7 +1,0 @@
-package message;
-
-message Note    {
-   required string name = 1;
-   required int64 date = 2;
-   required string comment = 3;
-}
