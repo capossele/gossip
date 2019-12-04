@@ -71,8 +71,8 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	}
 	if i == maxAttempts {
 		m.log.Warnw("Connection failed to", "peer", peer.ID().String())
+		Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
 		return err
-		// TODO: handle error, maybe drop peer
 	}
 
 	// add the new neighbor
