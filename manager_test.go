@@ -26,6 +26,9 @@ func init() {
 	}
 	logger = l.Sugar()
 }
+func testGetTransaction(h []byte) ([]byte, error) {
+	return []byte("testTx"), nil
+}
 
 func newTest(t require.TestingT, name string, address string) (*Manager, func(), *peer.Peer) {
 	log := logger.Named(name)
@@ -37,7 +40,7 @@ func newTest(t require.TestingT, name string, address string) (*Manager, func(),
 	trans, err := transport.Listen(local, log)
 	require.NoError(t, err)
 
-	mgr := NewManager(trans, log)
+	mgr := NewManager(trans, log, testGetTransaction)
 
 	// update the service with the actual address
 	require.NoError(t, local.UpdateService(service.GossipKey, trans.LocalAddr().Network(), trans.LocalAddr().String()))

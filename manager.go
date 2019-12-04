@@ -17,17 +17,20 @@ const (
 	maxAttempts = 3
 )
 
+type GetTransaction func(txHash []byte) ([]byte, error)
 type Manager struct {
-	neighborhood *neighbor.NeighborMap
-	trans        *transport.TransportTCP
-	log          *zap.SugaredLogger
+	neighborhood   *neighbor.NeighborMap
+	trans          *transport.TransportTCP
+	log            *zap.SugaredLogger
+	getTransaction GetTransaction
 }
 
-func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger) *Manager {
+func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
 	return &Manager{
-		neighborhood: neighbor.NewMap(),
-		trans:        t,
-		log:          log,
+		neighborhood:   neighbor.NewMap(),
+		trans:          t,
+		log:            log,
+		getTransaction: f,
 	}
 }
 
@@ -137,6 +140,12 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 		}
 		m.log.Debugw("Received Tx Req", "data", msg.GetHash())
 		// do something
+		tx, err := m.getTransaction(msg.GetHash())
+		if err != nil {
+			m.log.Debugw("Tx not available", "tx", msg.GetHash())
+		} else {
+			m.Send(tx, neighbor)
+		}
 
 	default:
 		return nil
