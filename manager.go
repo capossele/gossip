@@ -13,6 +13,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	maxAttempts = 3
+)
+
 type Manager struct {
 	neighborhood *neighbor.NeighborMap
 	trans        *transport.TransportTCP
@@ -41,7 +45,7 @@ func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
 	}
 
 	for _, neighbor := range neighbors {
-		m.log.Debugw("Sending", "data", data, "body", tx.GetBody())
+		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "data", data, "body", tx.GetBody())
 		err := neighbor.Conn.Write(msg)
 		if err != nil {
 			m.log.Debugw("Send error", "err", err)
@@ -54,8 +58,19 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 		return errors.New("Neighbor already added")
 	}
 
-	conn, err := handshake(peer)
-	if err != nil {
+	var err error
+	var conn *transport.Connection
+	i := 0
+	for i = 0; i < maxAttempts; i++ {
+		conn, err = handshake(peer)
+		if err != nil {
+			m.log.Warnw("Connection attempt failed", "attempt", i+1)
+		} else {
+			break
+		}
+	}
+	if i == maxAttempts {
+		m.log.Warnw("Connection failed to", "peer", peer.ID().String())
 		return err
 		// TODO: handle error, maybe drop peer
 	}
@@ -72,6 +87,9 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 
 func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
 	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
+
+	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
+
 	m.neighborhood.Delete(n.Peer.ID().String())
 }
 

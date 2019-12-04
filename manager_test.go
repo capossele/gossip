@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"testing"
+	"time"
 
 	pb "github.com/capossele/gossip/proto"
 	"github.com/capossele/gossip/transport"
@@ -53,7 +54,7 @@ func TestClose(t *testing.T) {
 	teardown()
 }
 
-func TestConnect(t *testing.T) {
+func TestUnicast(t *testing.T) {
 	mgrA, closeA, peerA := newTest(t, "A", "127.0.0.1:0")
 	defer closeA()
 
@@ -67,37 +68,13 @@ func TestConnect(t *testing.T) {
 		defer wg.Done()
 		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
 		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrA.neighborhood.Len())
 	}()
 	go func() {
 		defer wg.Done()
 		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
 		assert.NoError(t, err)
-	}()
-
-	wg.Wait()
-	assert.Equal(t, mgrA.neighborhood.Len(), 1)
-	assert.Equal(t, mgrA.neighborhood.Len(), 1)
-}
-
-func TestSend(t *testing.T) {
-	mgrA, closeA, peerA := newTest(t, "A", "127.0.0.1:0")
-	defer closeA()
-
-	mgrB, closeB, peerB := newTest(t, "B", "127.0.0.1:0")
-	defer closeB()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
-		assert.NoError(t, err)
-	}()
-	go func() {
-		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
-		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrB.neighborhood.Len())
 	}()
 
 	wg.Wait()
@@ -108,14 +85,94 @@ func TestSend(t *testing.T) {
 	b, err := proto.Marshal(tx)
 	assert.NoError(t, err)
 
-	wg.Add(1)
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		assert.Equal(t, tx.GetBody(), ev.Body)
-		wg.Done()
+	sendChan := make(chan struct{})
+	sendSuccess := false
 
+	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("Event triggered", "data", ev.Body)
+		assert.Equal(t, tx.GetBody(), ev.Body)
+		sendChan <- struct{}{}
 	}))
 
 	mgrA.Send(b)
 
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sendChan:
+		sendSuccess = true
+	case <-timer.C:
+		sendSuccess = false
+	}
+
+	assert.True(t, sendSuccess)
+}
+
+func TestBroadcast(t *testing.T) {
+	mgrA, closeA, peerA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
+
+	mgrB, closeB, peerB := newTest(t, "B", "127.0.0.1:0")
+	defer closeB()
+
+	mgrC, closeC, peerC := newTest(t, "C", "127.0.0.1:0")
+	defer closeC()
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		assert.NoError(t, err)
+		err = mgrA.addNeighbor(peerC, mgrA.trans.AcceptPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrA.neighborhood.Len())
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrB.neighborhood.Len())
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrC.addNeighbor(peerA, mgrC.trans.DialPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrC.neighborhood.Len())
+	}()
+
 	wg.Wait()
+
+	tx := &pb.Transaction{
+		Body: []byte("Hello!"),
+	}
+	b, err := proto.Marshal(tx)
+	assert.NoError(t, err)
+
+	sendChan := make(chan struct{}, 5)
+	sendSuccess := false
+
+	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("Event triggered", "data", ev.Body)
+		assert.Equal(t, tx.GetBody(), ev.Body)
+		sendChan <- struct{}{}
+	}))
+
+	mgrA.Send(b)
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sendChan:
+		logger.Debugw("Channel consumed")
+		sendSuccess = true
+	case <-timer.C:
+		logger.Debugw("Timer triggered")
+		sendSuccess = false
+	}
+
+	assert.True(t, sendSuccess)
 }
