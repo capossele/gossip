@@ -93,7 +93,9 @@ func Listen(local *peer.Local, log *zap.SugaredLogger) (*TransportTCP, error) {
 func (t *TransportTCP) Close() {
 	t.closeOnce.Do(func() {
 		close(t.closing)
-		t.listener.Close()
+		if err := t.listener.Close(); err != nil {
+			t.log.Warnw("close error", "err", err)
+		}
 		t.wg.Wait()
 	})
 }
@@ -121,6 +123,7 @@ func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
 		return nil, err
 	}
 
+	t.log.Debugw("connected", "id", p.ID(), "addr", conn.RemoteAddr(), "direction", "outgoing")
 	return newConnection(p, conn), nil
 }
 
@@ -137,17 +140,26 @@ func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
 		connected: connected,
 	}
 
+	// add the matcher
 	select {
 	case t.addAcceptMatcher <- m:
 	case <-t.closing:
 		return nil, ErrClosed
 	}
 
+	// wait for the connection
 	c := <-connected
 	if c == nil {
 		return nil, ErrTimeout
 	}
+	t.log.Debugw("connected", "id", p.ID(), "addr", c.conn.RemoteAddr(), "direction", "incoming")
 	return c, nil
+}
+
+func (t *TransportTCP) closeConnection(c net.Conn) {
+	if err := c.Close(); err != nil {
+		t.log.Warnw("close error", "err", err)
+	}
 }
 
 func (t *TransportTCP) run() {
@@ -188,13 +200,13 @@ func (t *TransportTCP) run() {
 					matched = true
 					mlist.Remove(el)
 					// finish the handshake
-					go t.matchAccept(a, m)
+					go t.matchAccept(m, a.req, a.conn)
 				}
 			}
 			// close the connection if not matched
 			if !matched {
 				t.log.Debugw("unexpected connection", "id", a.fromID, "addr", a.conn.RemoteAddr())
-				a.conn.Close()
+				t.closeConnection(a.conn)
 			}
 
 		// on timeout, check for expired matchers
@@ -221,23 +233,18 @@ func (t *TransportTCP) run() {
 	}
 }
 
-func (t *TransportTCP) matchAccept(a accept, m *acceptMatcher) {
+func (t *TransportTCP) matchAccept(m *acceptMatcher, req []byte, conn net.Conn) {
 	t.wg.Add(1)
 	defer t.wg.Done()
 
-	err := t.writeHandshakeResponse(a.req, a.conn)
+	err := t.writeHandshakeResponse(req, conn)
 	if err != nil {
-		t.log.Warnw("failed handshake", "addr", a.conn.RemoteAddr(), "err", err)
-		a.conn.Close()
+		t.log.Warnw("failed handshake", "addr", conn.RemoteAddr(), "err", err)
+		m.connected <- nil
+		t.closeConnection(conn)
 		return
 	}
-
-	c := newConnection(m.peer, a.conn)
-	select {
-	case m.connected <- c:
-	case <-t.closing:
-		c.Close()
-	}
+	m.connected <- newConnection(m.peer, conn)
 }
 
 func (t *TransportTCP) listenLoop() {
@@ -257,7 +264,7 @@ func (t *TransportTCP) listenLoop() {
 		key, req, err := t.readHandshakeRequest(conn)
 		if err != nil {
 			t.log.Warnw("failed handshake", "addr", conn.RemoteAddr(), "err", err)
-			_ = conn.Close()
+			t.closeConnection(conn)
 			continue
 		}
 
@@ -268,7 +275,7 @@ func (t *TransportTCP) listenLoop() {
 			conn:   conn,
 		}:
 		case <-t.closing:
-			_ = conn.Close()
+			t.closeConnection(conn)
 			return
 		}
 	}
@@ -299,7 +306,10 @@ func (t *TransportTCP) doHandshake(key peer.PublicKey, address string, conn net.
 		return err
 	}
 	b = make([]byte, MaxPacketSize)
-	n, _ := conn.Read(b)
+	n, err := conn.Read(b)
+	if err != nil {
+		return err
+	}
 
 	res := new(pb.Packet)
 	if err := proto.Unmarshal(b[:n], res); err != nil {

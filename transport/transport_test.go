@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/iotaledger/autopeering-sim/peer"
 	"github.com/iotaledger/autopeering-sim/peer/service"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+const graceTime = 5 * time.Millisecond
 
 var logger *zap.SugaredLogger
 
@@ -59,6 +62,22 @@ func TestUnansweredAccept(t *testing.T) {
 
 	_, err := transA.AcceptPeer(getPeer(transA))
 	assert.Error(t, err)
+}
+
+func TestCloseWhileAccepting(t *testing.T) {
+	transA, closeA := newTest(t, "A")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := transA.AcceptPeer(getPeer(transA))
+		assert.Error(t, err)
+	}()
+	time.Sleep(graceTime)
+
+	closeA()
+	wg.Wait()
 }
 
 func TestUnansweredDial(t *testing.T) {
