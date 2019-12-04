@@ -49,7 +49,7 @@ type acceptMatcher struct {
 	// deadline for the incoming call
 	deadline time.Time
 
-	connected chan *connection
+	connected chan *Connection
 }
 
 type accept struct {
@@ -99,7 +99,7 @@ func (t *TransportTCP) LocalAddr() net.Addr {
 	return t.listener.Addr()
 }
 
-func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
+func (t *TransportTCP) DialPeer(p *peer.Peer) (*Connection, error) {
 	gossipAddr := p.Services().Get(service.GossipKey)
 	conn, err := net.DialTimeout(gossipAddr.Network(), gossipAddr.String(), acceptTimeout)
 	if err != nil {
@@ -114,8 +114,8 @@ func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
 	return newConnection(p, conn), nil
 }
 
-func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
-	connected := make(chan *connection, 1)
+func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*Connection, error) {
+	connected := make(chan *Connection, 1)
 	m := &acceptMatcher{
 		peer:      p,
 		connected: connected,

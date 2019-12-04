@@ -6,23 +6,23 @@ import (
 	"github.com/iotaledger/autopeering-sim/peer"
 )
 
-type connection struct {
+type Connection struct {
 	peer *peer.Peer
 	conn net.Conn
 }
 
-func newConnection(p *peer.Peer, c net.Conn) *connection {
-	return &connection{
+func newConnection(p *peer.Peer, c net.Conn) *Connection {
+	return &Connection{
 		peer: p,
 		conn: c,
 	}
 }
 
-func (c *connection) Close() {
+func (c *Connection) Close() {
 	c.conn.Close()
 }
 
-func (c *connection) Read() ([]byte, error) {
+func (c *Connection) Read() ([]byte, error) {
 	b := make([]byte, MaxPacketSize)
 	n, err := c.conn.Read(b)
 	if err != nil {
@@ -32,7 +32,7 @@ func (c *connection) Read() ([]byte, error) {
 	return b[:n], nil
 }
 
-func (c *connection) Write(b []byte) error {
+func (c *Connection) Write(b []byte) error {
 	_, err := c.conn.Write(b)
 	return err
 }
