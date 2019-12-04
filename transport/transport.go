@@ -15,19 +15,23 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	ErrTimeout = errors.New("accept timeout")
-	ErrClosed  = errors.New("listener closed")
-)
-
 const (
-	acceptTimeout     = 1 * time.Second
-	handshakeTimeout  = 500 * time.Millisecond
-	connectionTimeout = acceptTimeout + 2*handshakeTimeout
-
 	// MaxPacketSize specifies the maximum allowed size of packets.
 	// Packets larger than this will be cut and thus treated as invalid.
 	MaxPacketSize = 1280
+)
+
+var (
+	ErrTimeout  = errors.New("accept timeout")
+	ErrClosed   = errors.New("listener closed")
+	ErrNoGossip = errors.New("peer does not have a gossip service")
+)
+
+// connection timeouts
+const (
+	acceptTimeout     = 500 * time.Millisecond
+	handshakeTimeout  = 100 * time.Millisecond
+	connectionTimeout = acceptTimeout + handshakeTimeout
 )
 
 type TransportTCP struct {
@@ -44,24 +48,20 @@ type TransportTCP struct {
 }
 
 type acceptMatcher struct {
-	peer *peer.Peer
-
-	// deadline for the incoming call
-	deadline time.Time
-
-	connected chan *connection
+	peer      *peer.Peer       // connecting peer
+	deadline  time.Time        // deadline for the incoming call
+	connected chan *connection // a successful connection is signaled here
 }
 
 type accept struct {
-	fromID peer.ID
-	conn   net.Conn
+	fromID peer.ID  // ID of the connecting peer
+	req    []byte   // raw data of the handshake request
+	conn   net.Conn // the actual network connection
 }
 
 func Listen(local *peer.Local, log *zap.SugaredLogger) (*TransportTCP, error) {
-
 	t := &TransportTCP{
 		local:            local,
-		listener:         nil,
 		log:              log,
 		addAcceptMatcher: make(chan *acceptMatcher),
 		acceptReceived:   make(chan accept),
@@ -69,7 +69,9 @@ func Listen(local *peer.Local, log *zap.SugaredLogger) (*TransportTCP, error) {
 	}
 
 	gossipAddr := local.Services().Get(service.GossipKey)
-
+	if gossipAddr == nil {
+		return nil, ErrNoGossip
+	}
 	tcpAddr, err := net.ResolveTCPAddr(gossipAddr.Network(), gossipAddr.String())
 	if err != nil {
 		return nil, err
@@ -81,12 +83,13 @@ func Listen(local *peer.Local, log *zap.SugaredLogger) (*TransportTCP, error) {
 	t.listener = listener
 
 	t.wg.Add(2)
-	go t.loop()
+	go t.run()
 	go t.listenLoop()
 
 	return t, nil
 }
 
+// Close stops listening on the gossip address.
 func (t *TransportTCP) Close() {
 	t.closeOnce.Do(func() {
 		close(t.closing)
@@ -95,18 +98,25 @@ func (t *TransportTCP) Close() {
 	})
 }
 
+// LocalAddr returns the listener's network address,
 func (t *TransportTCP) LocalAddr() net.Addr {
 	return t.listener.Addr()
 }
 
+// DialPeer establishes a gossip connection to the given peer.
+// If the peer does not accept the connection or the handshake fails, an error is returned.
 func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
 	gossipAddr := p.Services().Get(service.GossipKey)
+	if gossipAddr == nil {
+		return nil, ErrNoGossip
+	}
+
 	conn, err := net.DialTimeout(gossipAddr.Network(), gossipAddr.String(), acceptTimeout)
 	if err != nil {
 		return nil, err
 	}
 
-	err = t.sendHandshake(p.PublicKey(), gossipAddr.String(), conn)
+	err = t.doHandshake(p.PublicKey(), gossipAddr.String(), conn)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +124,13 @@ func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
 	return newConnection(p, conn), nil
 }
 
+// AcceptPeer awaits an incoming connection from the given peer.
+// If the peer does not establish the connection or the handshake fails, an error is returned.
 func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
+	if p.Services().Get(service.GossipKey) == nil {
+		return nil, ErrNoGossip
+	}
+
 	connected := make(chan *connection, 1)
 	m := &acceptMatcher{
 		peer:      p,
@@ -134,7 +150,7 @@ func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
 	return c, nil
 }
 
-func (t *TransportTCP) loop() {
+func (t *TransportTCP) run() {
 	defer t.wg.Done()
 
 	var (
@@ -170,15 +186,24 @@ func (t *TransportTCP) loop() {
 				m := el.Value.(*acceptMatcher)
 				if m.peer.ID() == a.fromID {
 					matched = true
-
-					m.connected <- newConnection(m.peer, a.conn)
 					mlist.Remove(el)
+
+					// finish the handshake
+					go func() {
+						err := t.writeHandshakeResponse(a.req, a.conn)
+						if err != nil {
+							t.log.Warnw("failed handshake", "addr", a.conn.RemoteAddr(), "err", err)
+							a.conn.Close()
+						} else {
+							m.connected <- newConnection(m.peer, a.conn)
+						}
+					}()
 				}
 			}
 			// close the connection if not matched
 			if !matched {
-				err := a.conn.Close()
-				t.log.Warnw("close error", "err", err)
+				t.log.Debugw("unexpected connection", "id", a.fromID, "addr", a.conn.RemoteAddr())
+				a.conn.Close()
 			}
 
 		// on timeout, check for expired matchers
@@ -219,7 +244,7 @@ func (t *TransportTCP) listenLoop() {
 			return
 		}
 
-		key, err := t.receiveHandshake(conn)
+		key, req, err := t.readHandshakeRequest(conn)
 		if err != nil {
 			t.log.Warnw("failed handshake", "addr", conn.RemoteAddr(), "err", err)
 			_ = conn.Close()
@@ -229,6 +254,7 @@ func (t *TransportTCP) listenLoop() {
 		select {
 		case t.acceptReceived <- accept{
 			fromID: key.ID(),
+			req:    req,
 			conn:   conn,
 		}:
 		case <-t.closing:
@@ -238,7 +264,7 @@ func (t *TransportTCP) listenLoop() {
 	}
 }
 
-func (t *TransportTCP) sendHandshake(key peer.PublicKey, address string, conn net.Conn) error {
+func (t *TransportTCP) doHandshake(key peer.PublicKey, address string, conn net.Conn) error {
 	// TODO: do something better here
 	data := []byte(address)
 	req := &pb.Packet{
@@ -281,26 +307,29 @@ func (t *TransportTCP) sendHandshake(key peer.PublicKey, address string, conn ne
 	return nil
 }
 
-func (t *TransportTCP) receiveHandshake(conn net.Conn) (peer.PublicKey, error) {
+func (t *TransportTCP) readHandshakeRequest(conn net.Conn) (peer.PublicKey, []byte, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
 	b := make([]byte, MaxPacketSize)
 	n, _ := conn.Read(b)
 
 	req := new(pb.Packet)
 	if err := proto.Unmarshal(b[:n], req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	key, err := peer.RecoverKeyFromSignedData(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// TODO: do something more meaningful here
-	data := req.GetData()
+	return key, req.GetData(), nil
+}
+
+func (t *TransportTCP) writeHandshakeResponse(reqData []byte, conn net.Conn) error {
+	// TODO: do something meaningful with the request
+	data := reqData
 
 	res := &pb.Packet{
 		PublicKey: t.local.PublicKey(),
@@ -308,18 +337,18 @@ func (t *TransportTCP) receiveHandshake(conn net.Conn) (peer.PublicKey, error) {
 		Data:      data,
 	}
 
-	b, err = proto.Marshal(res)
+	b, err := proto.Marshal(res)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return nil, err
+		return err
 	}
 	_, err = conn.Write(b)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return key, nil
+	return nil
 }
