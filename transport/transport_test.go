@@ -22,14 +22,16 @@ func init() {
 	logger = l.Sugar()
 }
 
-func newTest(t require.TestingT, name string, address string) (*TransportTCP, func()) {
-	log := logger.Named(name)
-	db := peer.NewMemoryDB(log.Named("db"))
-	local, err := peer.NewLocal("peering", address, db)
+func newTest(t require.TestingT, name string) (*TransportTCP, func()) {
+	l := logger.Named(name)
+	db := peer.NewMemoryDB(l.Named("db"))
+	local, err := peer.NewLocal("peering", name, db)
 	require.NoError(t, err)
-	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", address))
 
-	trans, err := Listen(local, log)
+	// enable TCP gossipping
+	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", "127.0.0.1:0"))
+
+	trans, err := Listen(local, l)
 	require.NoError(t, err)
 
 	// update the service with the actual address
@@ -47,12 +49,12 @@ func getPeer(t *TransportTCP) *peer.Peer {
 }
 
 func TestClose(t *testing.T) {
-	_, teardown := newTest(t, "A", "127.0.0.1:0")
+	_, teardown := newTest(t, "A")
 	teardown()
 }
 
 func TestUnansweredAccept(t *testing.T) {
-	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	transA, closeA := newTest(t, "A")
 	defer closeA()
 
 	_, err := transA.AcceptPeer(getPeer(transA))
@@ -60,7 +62,7 @@ func TestUnansweredAccept(t *testing.T) {
 }
 
 func TestUnansweredDial(t *testing.T) {
-	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	transA, closeA := newTest(t, "A")
 	defer closeA()
 
 	// create peer with invalid gossip address
@@ -73,9 +75,9 @@ func TestUnansweredDial(t *testing.T) {
 }
 
 func TestConnect(t *testing.T) {
-	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	transA, closeA := newTest(t, "A")
 	defer closeA()
-	transB, closeB := newTest(t, "B", "127.0.0.1:0")
+	transB, closeB := newTest(t, "B")
 	defer closeB()
 
 	var wg sync.WaitGroup
@@ -102,11 +104,11 @@ func TestConnect(t *testing.T) {
 }
 
 func TestWrongConnect(t *testing.T) {
-	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	transA, closeA := newTest(t, "A")
 	defer closeA()
-	transB, closeB := newTest(t, "B", "127.0.0.1:0")
+	transB, closeB := newTest(t, "B")
 	defer closeB()
-	transC, closeC := newTest(t, "C", "127.0.0.1:0")
+	transC, closeC := newTest(t, "C")
 	defer closeC()
 
 	var wg sync.WaitGroup

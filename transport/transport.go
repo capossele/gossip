@@ -179,7 +179,7 @@ func (t *TransportTCP) run() {
 			m.deadline = time.Now().Add(connectionTimeout)
 			mlist.PushBack(m)
 
-		// on accept received, check all matchers for fits
+		// on accept received, check all matchers for a fit
 		case a := <-t.acceptReceived:
 			matched := false
 			for el := mlist.Front(); el != nil; el = el.Next() {
@@ -187,17 +187,8 @@ func (t *TransportTCP) run() {
 				if m.peer.ID() == a.fromID {
 					matched = true
 					mlist.Remove(el)
-
 					// finish the handshake
-					go func() {
-						err := t.writeHandshakeResponse(a.req, a.conn)
-						if err != nil {
-							t.log.Warnw("failed handshake", "addr", a.conn.RemoteAddr(), "err", err)
-							a.conn.Close()
-						} else {
-							m.connected <- newConnection(m.peer, a.conn)
-						}
-					}()
+					go t.matchAccept(a, m)
 				}
 			}
 			// close the connection if not matched
@@ -219,7 +210,7 @@ func (t *TransportTCP) run() {
 				}
 			}
 
-		// on close, notice all the matchers
+		// on close, notify all the matchers
 		case <-t.closing:
 			for el := mlist.Front(); el != nil; el = el.Next() {
 				el.Value.(*acceptMatcher).connected <- nil
@@ -227,6 +218,25 @@ func (t *TransportTCP) run() {
 			return
 
 		}
+	}
+}
+
+func (t *TransportTCP) matchAccept(a accept, m *acceptMatcher) {
+	t.wg.Add(1)
+	defer t.wg.Done()
+
+	err := t.writeHandshakeResponse(a.req, a.conn)
+	if err != nil {
+		t.log.Warnw("failed handshake", "addr", a.conn.RemoteAddr(), "err", err)
+		a.conn.Close()
+		return
+	}
+
+	c := newConnection(m.peer, a.conn)
+	select {
+	case m.connected <- c:
+	case <-t.closing:
+		c.Close()
 	}
 }
 
