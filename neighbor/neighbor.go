@@ -7,11 +7,13 @@ import (
 	"github.com/iotaledger/autopeering-sim/peer"
 )
 
+// Neighbor defines a neighbor
 type Neighbor struct {
 	Peer *peer.Peer
 	Conn *transport.Connection
 }
 
+// NeighborMap implements a map of neighbors thraed safe
 type NeighborMap struct {
 	sync.RWMutex
 	internal map[string]*Neighbor
@@ -32,7 +34,7 @@ func New(peer *peer.Peer, conn *transport.Connection) *Neighbor {
 	}
 }
 
-// Len returns the number of peers stored in a PeerMap
+// Len returns the number of neighbors stored in a NeighborMap
 func (nm *NeighborMap) Len() int {
 	nm.RLock()
 	defer nm.RUnlock()
@@ -50,7 +52,7 @@ func (nm *NeighborMap) GetMap() map[string]*Neighbor {
 	return newMap
 }
 
-// GetMap returns the content of the entire internal map
+// GetSlice returns a slice of the content of the entire internal map
 func (nm *NeighborMap) GetSlice() []*Neighbor {
 	newSlice := make([]*Neighbor, nm.Len())
 	nm.RLock()
@@ -63,9 +65,9 @@ func (nm *NeighborMap) GetSlice() []*Neighbor {
 	return newSlice
 }
 
-// Load returns the peer for a given key.
+// Load returns the neighbor for a given key.
 // It also return a bool to communicate the presence of the given
-// peer into the internal map
+// neighbor into the internal map
 func (nm *NeighborMap) Load(key string) (value *Neighbor, ok bool) {
 	nm.RLock()
 	defer nm.RUnlock()
@@ -88,7 +90,7 @@ func (nm *NeighborMap) Delete(key string) (deletedNeighbor *Neighbor, ok bool) {
 	return deletedNeighbor, true
 }
 
-// Store adds a new peer to the PeerMap
+// Store adds a new neighbor to the NeighborMap
 func (nm *NeighborMap) Store(key string, value *Neighbor) {
 	nm.Lock()
 	defer nm.Unlock()
