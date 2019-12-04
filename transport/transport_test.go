@@ -59,10 +59,22 @@ func TestUnansweredAccept(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestConnect(t *testing.T) {
+func TestUnansweredDial(t *testing.T) {
 	transA, closeA := newTest(t, "A", "127.0.0.1:0")
 	defer closeA()
 
+	// create peer with invalid gossip address
+	services := getPeer(transA).Services().CreateRecord()
+	services.Update(service.GossipKey, "tcp", "127.0.0.1:0")
+	unreachablePeer := peer.NewPeer(getPeer(transA).PublicKey(), services)
+
+	_, err := transA.DialPeer(unreachablePeer)
+	assert.Error(t, err)
+}
+
+func TestConnect(t *testing.T) {
+	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
 	transB, closeB := newTest(t, "B", "127.0.0.1:0")
 	defer closeB()
 
@@ -84,6 +96,32 @@ func TestConnect(t *testing.T) {
 		if assert.NotNil(t, c) {
 			c.Close()
 		}
+	}()
+
+	wg.Wait()
+}
+
+func TestWrongConnect(t *testing.T) {
+	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
+	transB, closeB := newTest(t, "B", "127.0.0.1:0")
+	defer closeB()
+	transC, closeC := newTest(t, "C", "127.0.0.1:0")
+	defer closeC()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// a expects connection from B, but C is connecting
+	go func() {
+		defer wg.Done()
+		_, err := transA.AcceptPeer(getPeer(transB))
+		assert.Error(t, err)
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := transC.DialPeer(getPeer(transA))
+		assert.Error(t, err)
 	}()
 
 	wg.Wait()
