@@ -6,6 +6,12 @@ import (
 	"github.com/iotaledger/autopeering-sim/peer"
 )
 
+const (
+	// MaxPacketSize specifies the maximum allowed size of packets.
+	// Packets larger than this will be cut and thus treated as invalid.
+	MaxPacketSize = 1280
+)
+
 type Connection struct {
 	peer *peer.Peer
 	conn net.Conn
