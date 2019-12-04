@@ -2,6 +2,7 @@ package transport
 
 import (
 	"log"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func newTest(t require.TestingT, name string) (*TransportTCP, func()) {
 	require.NoError(t, err)
 
 	// enable TCP gossipping
-	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", "127.0.0.1:0"))
+	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", ":0"))
 
 	trans, err := Listen(local, l)
 	require.NoError(t, err)
@@ -86,11 +87,57 @@ func TestUnansweredDial(t *testing.T) {
 
 	// create peer with invalid gossip address
 	services := getPeer(transA).Services().CreateRecord()
-	services.Update(service.GossipKey, "tcp", "127.0.0.1:0")
+	services.Update(service.GossipKey, "tcp", ":0")
 	unreachablePeer := peer.NewPeer(getPeer(transA).PublicKey(), services)
 
 	_, err := transA.DialPeer(unreachablePeer)
 	assert.Error(t, err)
+}
+
+func TestNoHandshakeResponse(t *testing.T) {
+	transA, closeA := newTest(t, "A")
+	defer closeA()
+
+	// accept and read incoming connections
+	lis, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	go func() {
+		conn, err := lis.Accept()
+		require.NoError(t, err)
+		n, _ := conn.Read(make([]byte, MaxPacketSize))
+		assert.NotZero(t, n)
+		_ = conn.Close()
+		_ = lis.Close()
+	}()
+
+	// create peer for the listener
+	services := getPeer(transA).Services().CreateRecord()
+	services.Update(service.GossipKey, lis.Addr().Network(), lis.Addr().String())
+	p := peer.NewPeer(getPeer(transA).PublicKey(), services)
+
+	_, err = transA.DialPeer(p)
+	assert.Error(t, err)
+}
+
+func TestNoHandshakeRequest(t *testing.T) {
+	transA, closeA := newTest(t, "A")
+	defer closeA()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := transA.AcceptPeer(getPeer(transA))
+		assert.Error(t, err)
+	}()
+	time.Sleep(graceTime)
+
+	conn, err := net.Dial(transA.LocalAddr().Network(), transA.LocalAddr().String())
+	require.NoError(t, err)
+	time.Sleep(handshakeTimeout)
+	_ = conn.Close()
+
+	wg.Wait()
 }
 
 func TestConnect(t *testing.T) {
@@ -104,15 +151,16 @@ func TestConnect(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		c, err := transB.AcceptPeer(getPeer(transA))
+		c, err := transA.AcceptPeer(getPeer(transB))
 		assert.NoError(t, err)
 		if assert.NotNil(t, c) {
 			c.Close()
 		}
 	}()
+	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		c, err := transA.DialPeer(getPeer(transB))
+		c, err := transB.DialPeer(getPeer(transA))
 		assert.NoError(t, err)
 		if assert.NotNil(t, c) {
 			c.Close()
