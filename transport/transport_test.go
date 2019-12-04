@@ -1,82 +1,90 @@
 package transport
 
 import (
-	"net"
+	"log"
+	"sync"
 	"testing"
 
+	"github.com/iotaledger/autopeering-sim/peer"
+	"github.com/iotaledger/autopeering-sim/peer/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
-func dummyConf(addr string) TCPConfig {
-	return TCPConfig{
-		MaxMessageSize: 1000,
-		EnableLogging:  false,
-		Address:        addr,
+var logger *zap.SugaredLogger
+
+func init() {
+	l, err := zap.NewDevelopment()
+	if err != nil {
+		log.Fatalf("cannot initialize logger: %v", err)
 	}
-}
-func TestNewTransportTCP(t *testing.T) {
-	A, err := NewTransportTCP(dummyConf("127.0.0.1:8080"))
-	require.NoError(t, err)
-	A.Close()
+	logger = l.Sugar()
 }
 
-func TestABConnection(t *testing.T) {
-	addrA := "127.0.0.1:8081"
-	addrB := "127.0.0.1:8082"
-	A, err := NewTransportTCP(dummyConf(addrA))
+func newTest(t require.TestingT, name string, address string) (*TransportTCP, func()) {
+	log := logger.Named(name)
+	db := peer.NewMemoryDB(log.Named("db"))
+	local, err := peer.NewLocal("peering", address, db)
 	require.NoError(t, err)
-	B, err := NewTransportTCP(dummyConf(addrB))
-	require.NoError(t, err)
+	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", address))
 
-	err = A.StartListeningAsync()
-	require.NoError(t, err)
-
-	err = B.StartListeningAsync()
+	trans, err := Listen(local, log)
 	require.NoError(t, err)
 
-	msg := "Hello"
+	// update the service with the actual address
+	require.NoError(t, local.UpdateService(service.GossipKey, trans.LocalAddr().Network(), trans.LocalAddr().String()))
 
-	err = A.WriteTo([]byte(msg), addrB)
-	require.NoError(t, err)
-
-	var rcv []byte
-	var from string
-	for {
-		rcv, from, err = B.ReadFrom()
-		require.NoError(t, err)
-		if len(rcv) > 0 {
-			break
-		}
+	teardown := func() {
+		trans.Close()
+		db.Close()
 	}
-	assert.Equal(t, []byte(msg), rcv)
+	return trans, teardown
+}
 
-	ipA, _, _ := net.SplitHostPort(addrA)
-	ipReceived, port, _ := net.SplitHostPort(from)
-	assert.Equal(t, ipA, ipReceived)
+func getPeer(t *TransportTCP) *peer.Peer {
+	return &t.local.Peer
+}
 
-	err = B.WriteTo([]byte(msg), ipReceived+":"+port)
-	require.NoError(t, err)
+func TestClose(t *testing.T) {
+	_, teardown := newTest(t, "A", "127.0.0.1:0")
+	teardown()
+}
 
-	for {
-		rcv, from, err = A.ReadFrom()
-		require.NoError(t, err)
-		if len(rcv) > 0 {
-			break
+func TestUnansweredAccept(t *testing.T) {
+	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
+
+	_, err := transA.AcceptPeer(getPeer(transA))
+	assert.Error(t, err)
+}
+
+func TestConnect(t *testing.T) {
+	transA, closeA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
+
+	transB, closeB := newTest(t, "B", "127.0.0.1:0")
+	defer closeB()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		c, err := transB.AcceptPeer(getPeer(transA))
+		assert.NoError(t, err)
+		if assert.NotNil(t, c) {
+			c.Close()
 		}
-	}
-	assert.Equal(t, []byte(msg), rcv)
+	}()
+	go func() {
+		defer wg.Done()
+		c, err := transA.DialPeer(getPeer(transB))
+		assert.NoError(t, err)
+		if assert.NotNil(t, c) {
+			c.Close()
+		}
+	}()
 
-	ipB, _, _ := net.SplitHostPort(addrB)
-	ipReceived, _, _ = net.SplitHostPort(from)
-	assert.Equal(t, ipB, ipReceived)
-
-	assert.Equal(t, 1, len(A.connections))
-	assert.Equal(t, 1, len(B.connections))
-
-	A.Close()
-	B.Close()
-
-	assert.Equal(t, 0, len(A.connections))
-	assert.Equal(t, 0, len(B.connections))
+	wg.Wait()
 }

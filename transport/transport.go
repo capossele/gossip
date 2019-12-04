@@ -1,208 +1,325 @@
 package transport
 
 import (
-	"log"
+	"bytes"
+	"container/list"
+	"errors"
 	"net"
 	"sync"
+	"time"
+
+	"github.com/golang/protobuf/proto"
+	"github.com/iotaledger/autopeering-sim/peer"
+	"github.com/iotaledger/autopeering-sim/peer/service"
+	pb "github.com/iotaledger/autopeering-sim/server/proto"
+	"go.uber.org/zap"
 )
 
-// TransportConn wraps a TCPConn my un-/marshaling the packets using protobuf.
+var (
+	ErrTimeout = errors.New("accept timeout")
+	ErrClosed  = errors.New("listener closed")
+)
+
+const (
+	acceptTimeout     = 1 * time.Second
+	handshakeTimeout  = 500 * time.Millisecond
+	connectionTimeout = acceptTimeout + 2*handshakeTimeout
+
+	// MaxPacketSize specifies the maximum allowed size of packets.
+	// Packets larger than this will be cut and thus treated as invalid.
+	MaxPacketSize = 1280
+)
+
 type TransportTCP struct {
-	cfg             TCPConfig
-	connections     map[string]*net.TCPConn
-	lock            sync.RWMutex
-	listener        *net.TCPListener
-	receive         chan *transfer
-	shutdownChannel chan struct{}
+	local    *peer.Local
+	listener *net.TCPListener
+	log      *zap.SugaredLogger
+
+	addAcceptMatcher chan *acceptMatcher
+	acceptReceived   chan accept
+
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+	closing   chan struct{} // if this channel gets closed all pending waits should terminate
 }
 
-type transfer struct {
-	from string
-	data []byte
+type acceptMatcher struct {
+	peer *peer.Peer
+
+	// deadline for the incoming call
+	deadline time.Time
+
+	connected chan *connection
 }
 
-type TCPConfig struct {
-	// Controls how large the largest Message may be. The server will reject any messages whose clients
-	// header size does not match this configuration
-	MaxMessageSize int
-	// Controls the ability to enable logging errors occurring in the library
-	EnableLogging bool
-	// The local address to listen for incoming connections on.
-	Address string
-	// Receive buffer
-	Buffer int
+type accept struct {
+	fromID peer.ID
+	conn   net.Conn
 }
 
-// NewTransportTCP creates a new transport layer by using the underlying TCPConn.
-func NewTransportTCP(cfg TCPConfig) (*TransportTCP, error) {
+func Listen(local *peer.Local, log *zap.SugaredLogger) (*TransportTCP, error) {
+
 	t := &TransportTCP{
-		connections:     make(map[string]*net.TCPConn),
-		receive:         make(chan *transfer, 100),
-		cfg:             cfg,
-		shutdownChannel: make(chan struct{}),
+		local:            local,
+		listener:         nil,
+		log:              log,
+		addAcceptMatcher: make(chan *acceptMatcher),
+		acceptReceived:   make(chan accept),
+		closing:          make(chan struct{}),
 	}
-	if cfg.Buffer > 0 {
-		t.receive = make(chan *transfer, cfg.Buffer)
-	}
-	tcpAddr, err := net.ResolveTCPAddr("tcp", t.cfg.Address)
+
+	gossipAddr := local.Services().Get(service.GossipKey)
+
+	tcpAddr, err := net.ResolveTCPAddr(gossipAddr.Network(), gossipAddr.String())
 	if err != nil {
 		return nil, err
 	}
-	receiveSocket, err := net.ListenTCP("tcp", tcpAddr)
+	listener, err := net.ListenTCP(gossipAddr.Network(), tcpAddr)
 	if err != nil {
 		return nil, err
 	}
-	t.listener = receiveSocket
+	t.listener = listener
+
+	t.wg.Add(2)
+	go t.loop()
+	go t.listenLoop()
+
 	return t, nil
 }
 
-// ReadFrom implements the Transport ReadFrom method.
-func (t *TransportTCP) ReadFrom() ([]byte, string, error) {
-	b := make([]byte, t.cfg.MaxMessageSize)
-	select {
-	case rcv := <-t.receive:
-		n := copy(b, rcv.data)
-		return b[:n], rcv.from, nil
-	default:
-		return nil, "", nil
-	}
-}
-
-// TODO: refactor and add new addConnection / addPeer
-// WriteTo implements the Transport WriteTo method.
-func (t *TransportTCP) WriteTo(pkt []byte, address string) error {
-	t.lock.RLock()
-	// if the connection is not yet established, dial first
-	if _, ok := t.connections[address]; !ok {
-		t.lock.RUnlock()
-		err := t.connect(address)
-		if err != nil {
-			return err
-		}
-	} else {
-		t.lock.RUnlock()
-	}
-
-	t.lock.RLock()
-	defer t.lock.RUnlock()
-	_, err := t.connections[address].Write(pkt)
-	return err
-}
-
-// Close represents a way to signal to the Listener that it should no longer accept
-// incoming connections, and begin to shutdown.
 func (t *TransportTCP) Close() {
-	close(t.shutdownChannel)
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	for k, c := range t.connections {
-		c.Close()
-		delete(t.connections, k)
-	}
+	t.closeOnce.Do(func() {
+		close(t.closing)
+		t.listener.Close()
+		t.wg.Wait()
+	})
 }
 
-// Close represents a way to signal to the Listener that it should no longer accept
-// incoming connections, and begin to shutdown.
-func (t *TransportTCP) CloseConn(address string) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	// if the connection is not yet established, dial first
-	if _, ok := t.connections[address]; ok {
-		t.connections[address].Close()
-		delete(t.connections, address)
-	}
-}
-
-// LocalAddr returns the local network address.
 func (t *TransportTCP) LocalAddr() net.Addr {
 	return t.listener.Addr()
 }
 
-// connect opens a connection and starts a read loop on the connection
-func (t *TransportTCP) connect(address string) error {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", address)
+func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
+	gossipAddr := p.Services().Get(service.GossipKey)
+	conn, err := net.DialTimeout(gossipAddr.Network(), gossipAddr.String(), acceptTimeout)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+
+	err = t.sendHandshake(p.PublicKey(), gossipAddr.String(), conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	t.connections[address] = conn
-	go t.readLoop(conn)
-	return err
+
+	return newConnection(p, conn), nil
 }
 
-// StartListening represents a way to start accepting TCP connections as blocking
-func (t *TransportTCP) StartListening() error {
-	return t.blockListen()
+func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
+	connected := make(chan *connection, 1)
+	m := &acceptMatcher{
+		peer:      p,
+		connected: connected,
+	}
+
+	select {
+	case t.addAcceptMatcher <- m:
+	case <-t.closing:
+		return nil, ErrClosed
+	}
+
+	c := <-connected
+	if c == nil {
+		return nil, ErrTimeout
+	}
+	return c, nil
 }
 
-// StartListeningAsync represents a way to start accepting TCP connections as non-blocking
-func (t *TransportTCP) StartListeningAsync() error {
-	var err error
-	go func() {
-		err = t.blockListen()
-	}()
-	return err
-}
+func (t *TransportTCP) loop() {
+	defer t.wg.Done()
 
-// TODO: filter allowed addresses already from here
-// Actually blocks the thread it's running on, and begins handling incoming
-// requests
-func (t *TransportTCP) blockListen() error {
+	var (
+		mlist   = list.New()
+		timeout = time.NewTimer(0)
+	)
+	defer timeout.Stop()
+
+	<-timeout.C // ignore first timeout
+
 	for {
-		// Wait for someone to connect
-		c, err := t.listener.AcceptTCP()
-		if err != nil {
-			if t.cfg.EnableLogging {
-				log.Printf("Error attempting to accept connection: %s", err)
-			}
-			select {
-			case <-t.shutdownChannel:
-				return nil
-			default:
-				// Nothing, continue to the top of the loop
-			}
+
+		// Set the timer so that it fires when the next accept expires
+		if el := mlist.Front(); el != nil {
+			// the first element always has the closest deadline
+			m := el.Value.(*acceptMatcher)
+			timeout.Reset(time.Until(m.deadline))
 		} else {
-			// Hand this off and immediately listen for more
-			t.lock.Lock()
-			t.connections[c.RemoteAddr().String()] = c
-			t.lock.Unlock()
-			go t.readLoop(c)
+			timeout.Stop()
+		}
+
+		select {
+
+		// add a new matcher to the list
+		case m := <-t.addAcceptMatcher:
+			m.deadline = time.Now().Add(connectionTimeout)
+			mlist.PushBack(m)
+
+		// on accept received, check all matchers for fits
+		case a := <-t.acceptReceived:
+			matched := false
+			for el := mlist.Front(); el != nil; el = el.Next() {
+				m := el.Value.(*acceptMatcher)
+				if m.peer.ID() == a.fromID {
+					matched = true
+
+					m.connected <- newConnection(m.peer, a.conn)
+					mlist.Remove(el)
+				}
+			}
+			// close the connection if not matched
+			if !matched {
+				err := a.conn.Close()
+				t.log.Warnw("close error", "err", err)
+			}
+
+		// on timeout, check for expired matchers
+		case <-timeout.C:
+			now := time.Now()
+
+			// notify and remove any expired matchers
+			for el := mlist.Front(); el != nil; el = el.Next() {
+				m := el.Value.(*acceptMatcher)
+				if now.After(m.deadline) || now.Equal(m.deadline) {
+					m.connected <- nil
+					mlist.Remove(el)
+				}
+			}
+
+		// on close, notice all the matchers
+		case <-t.closing:
+			for el := mlist.Front(); el != nil; el = el.Next() {
+				el.Value.(*acceptMatcher).connected <- nil
+			}
+			return
+
 		}
 	}
 }
 
-// Handles incoming data over a given connection.
-func (t *TransportTCP) readLoop(conn *net.TCPConn) {
-	// dataBuffer will hold the message from each read
-	dataBuffer := make([]byte, t.cfg.MaxMessageSize)
+func (t *TransportTCP) listenLoop() {
+	defer t.wg.Done()
 
-	// Begin the read loop
-	// If there is any error, close the connection and break out of the read-loop.
 	for {
-		msgLen, err := conn.Read(dataBuffer)
-		// TODO: check if getting temporary errors (see server of autopeering)
-		if err != nil {
-			if t.cfg.EnableLogging {
-				log.Printf("Address %s: Failure to read from connection. Underlying error: %s", conn.RemoteAddr(), err)
-			}
-			t.CloseConn(conn.RemoteAddr().String())
+		conn, err := t.listener.AcceptTCP()
+		if err, ok := err.(net.Error); ok && err.Temporary() {
+			t.log.Debugw("temporary read error", "err", err)
+			continue
+		} else if err != nil {
+			// return from the loop on all other errors
+			t.log.Warnw("read error", "err", err)
 			return
 		}
-		// We send the received data to the receive channel
-		select {
-		case t.receive <- &transfer{
-			from: conn.RemoteAddr().String(),
-			data: dataBuffer[:msgLen],
-		}:
+
+		key, err := t.receiveHandshake(conn)
+		if err != nil {
+			t.log.Warnw("failed handshake", "addr", conn.RemoteAddr(), "err", err)
+			_ = conn.Close()
 			continue
-		case <-t.shutdownChannel:
-			t.CloseConn(conn.RemoteAddr().String())
+		}
+
+		select {
+		case t.acceptReceived <- accept{
+			fromID: key.ID(),
+			conn:   conn,
+		}:
+		case <-t.closing:
+			_ = conn.Close()
 			return
 		}
 	}
+}
+
+func (t *TransportTCP) sendHandshake(key peer.PublicKey, address string, conn net.Conn) error {
+	// TODO: do something better here
+	data := []byte(address)
+	req := &pb.Packet{
+		PublicKey: t.local.PublicKey(),
+		Signature: t.local.Sign(data),
+		Data:      data,
+	}
+	b, err := proto.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.SetWriteDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return err
+	}
+	_, err = conn.Write(b)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return err
+	}
+	b = make([]byte, MaxPacketSize)
+	n, _ := conn.Read(b)
+
+	res := new(pb.Packet)
+	if err := proto.Unmarshal(b[:n], res); err != nil {
+		return err
+	}
+
+	signer, err := peer.RecoverKeyFromSignedData(res)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(key, signer) {
+		return errors.New("invalid key")
+	}
+
+	return nil
+}
+
+func (t *TransportTCP) receiveHandshake(conn net.Conn) (peer.PublicKey, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return nil, err
+	}
+
+	b := make([]byte, MaxPacketSize)
+	n, _ := conn.Read(b)
+
+	req := new(pb.Packet)
+	if err := proto.Unmarshal(b[:n], req); err != nil {
+		return nil, err
+	}
+
+	key, err := peer.RecoverKeyFromSignedData(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: do something more meaningful here
+	data := req.GetData()
+
+	res := &pb.Packet{
+		PublicKey: t.local.PublicKey(),
+		Signature: t.local.Sign(data),
+		Data:      data,
+	}
+
+	b, err = proto.Marshal(res)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := conn.SetWriteDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return nil, err
+	}
+	_, err = conn.Write(b)
+	if err != nil {
+		return nil, err
+	}
+
+	return key, nil
 }
