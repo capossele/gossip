@@ -169,7 +169,6 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 	}
 
 	return nil
-
 }
 
 func marshal(msg pb.Message) []byte {
