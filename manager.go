@@ -1,7 +1,9 @@
 package gossip
 
 import (
+	"io"
 	"net"
+	"strings"
 	"sync"
 
 	pb "github.com/capossele/gossip/proto"
@@ -91,26 +93,19 @@ func (m *Manager) getNeighborsById(ids []peer.ID) []*neighbor {
 	return result
 }
 
-func (m *Manager) RequestTransaction(data []byte, to ...peer.ID) {
-	req := &pb.TransactionRequest{}
-	err := proto.Unmarshal(data, req)
-	if err != nil {
-		m.log.Warnw("Data to send is not a Transaction Request", "err", err)
+func (m *Manager) RequestTransaction(txHash []byte, to ...peer.ID) {
+	req := &pb.TransactionRequest{
+		Hash: txHash,
 	}
-	msg := marshal(req)
-
-	m.send(msg, to...)
+	m.send(marshal(req), to...)
 }
 
-func (m *Manager) Send(data []byte, to ...peer.ID) {
-	tx := &pb.Transaction{}
-	err := proto.Unmarshal(data, tx)
-	if err != nil {
-		m.log.Warnw("Data to send is not a Transaction", "err", err)
+// SendTransaction sends the transaction data to the given neighbors.
+func (m *Manager) SendTransaction(txData []byte, to ...peer.ID) {
+	tx := &pb.Transaction{
+		Body: txData,
 	}
-	msg := marshal(tx)
-
-	m.send(msg, to...)
+	m.send(marshal(tx), to...)
 }
 
 func (m *Manager) send(msg []byte, to ...peer.ID) {
@@ -190,9 +185,12 @@ func (m *Manager) readLoop(n *neighbor) {
 			continue
 		} else if err != nil {
 			// return from the loop on all other errors
-			m.log.Debugw("read error", "err", err)
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+				m.log.Warnw("read error", "err", err)
+			}
 			n.conn.Close() // just make sure that the connection is closed as fast as possible
 			m.deleteNeighbor(n.peer)
+			m.log.Debug("reading stopped")
 			return
 		}
 
@@ -227,7 +225,7 @@ func (m *Manager) handlePacket(data []byte, n *neighbor) error {
 			m.log.Debugw("Tx not available", "tx", msg.GetHash())
 		} else {
 			m.log.Debugw("Tx found", "tx", tx)
-			m.Send(tx, n.peer.ID())
+			m.SendTransaction(tx, n.peer.ID())
 		}
 
 	default:

@@ -24,9 +24,7 @@ var (
 	logger    *zap.SugaredLogger
 	eventMock mock.Mock
 
-	testTransaction = &pb.Transaction{
-		Body: []byte("testTx"),
-	}
+	testTxData = []byte("testTx")
 )
 
 func newTransactionEvent(ev *NewTransactionEvent) { eventMock.Called(ev) }
@@ -55,7 +53,7 @@ func init() {
 }
 
 func getTestTransaction([]byte) ([]byte, error) {
-	return proto.Marshal(testTransaction)
+	return testTxData, nil
 }
 
 func newTest(t require.TestingT, name string) (*Manager, func(), *peer.Peer) {
@@ -117,15 +115,13 @@ func TestUnicast(t *testing.T) {
 	wg.Wait()
 
 	eventMock.On("newTransactionEvent", &NewTransactionEvent{
-		Body: testTransaction.GetBody(),
+		Body: testTxData,
 		Peer: peerA,
 	}).Once()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 
-	b, err := proto.Marshal(testTransaction)
-	require.NoError(t, err)
-	mgrA.Send(b)
+	mgrA.SendTransaction(testTxData)
 	time.Sleep(graceTime)
 }
 
@@ -170,16 +166,14 @@ func TestBroadcast(t *testing.T) {
 	wg.Wait()
 
 	eventMock.On("newTransactionEvent", &NewTransactionEvent{
-		Body: testTransaction.GetBody(),
+		Body: testTxData,
 		Peer: peerA,
 	}).Twice()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Twice()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerC}).Once()
 
-	b, err := proto.Marshal(testTransaction)
-	require.NoError(t, err)
-	mgrA.Send(b)
+	mgrA.SendTransaction(testTxData)
 	time.Sleep(graceTime)
 }
 
@@ -228,7 +222,7 @@ func TestTxRequest(t *testing.T) {
 	wg.Wait()
 
 	eventMock.On("newTransactionEvent", &NewTransactionEvent{
-		Body: testTransaction.GetBody(),
+		Body: testTxData,
 		Peer: peerB,
 	}).Once()
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
