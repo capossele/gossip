@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const graceTime = 5 * time.Millisecond
+const graceTime = 10 * time.Millisecond
 
 var (
 	logger    *zap.SugaredLogger
@@ -31,6 +31,16 @@ var (
 
 func newTransactionEvent(ev *NewTransactionEvent) { eventMock.Called(ev) }
 func dropNeighborEvent(ev *DropNeighborEvent)     { eventMock.Called(ev) }
+
+// assertEvents initializes the mock and asserts the expectations
+func assertEvents(t *testing.T) func() {
+	eventMock = mock.Mock{}
+	return func() {
+		if !t.Failed() {
+			eventMock.AssertExpectations(t)
+		}
+	}
+}
 
 func init() {
 	l, err := zap.NewDevelopment()
@@ -49,21 +59,22 @@ func getTestTransaction([]byte) ([]byte, error) {
 }
 
 func newTest(t require.TestingT, name string) (*Manager, func(), *peer.Peer) {
-	log := logger.Named(name)
-	db := peer.NewMemoryDB(log.Named("db"))
+	l := logger.Named(name)
+	db := peer.NewMemoryDB(l.Named("db"))
 	local, err := peer.NewLocal("peering", name, db)
 	require.NoError(t, err)
 	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", "localhost:0"))
 
-	trans, err := transport.Listen(local, log)
+	trans, err := transport.Listen(local, l)
 	require.NoError(t, err)
 
-	mgr := NewManager(trans, log, getTestTransaction)
+	mgr := NewManager(trans, l, getTestTransaction)
 
 	// update the service with the actual address
 	require.NoError(t, local.UpdateService(service.GossipKey, trans.LocalAddr().Network(), trans.LocalAddr().String()))
 
 	teardown := func() {
+		mgr.Close()
 		trans.Close()
 		db.Close()
 	}
@@ -71,12 +82,16 @@ func newTest(t require.TestingT, name string) (*Manager, func(), *peer.Peer) {
 }
 
 func TestClose(t *testing.T) {
-	_, teardown, _ := newTest(t, "A1")
+	defer assertEvents(t)()
+
+	_, teardown, _ := newTest(t, "A")
 	teardown()
 }
 
 func TestUnicast(t *testing.T) {
-	mgrA, closeA, peerA := newTest(t, "A2")
+	defer assertEvents(t)()
+
+	mgrA, closeA, peerA := newTest(t, "A")
 	defer closeA()
 	mgrB, closeB, peerB := newTest(t, "B")
 	defer closeB()
@@ -84,6 +99,8 @@ func TestUnicast(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// connect in the following way
+	// B -> A
 	go func() {
 		defer wg.Done()
 		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
@@ -103,17 +120,19 @@ func TestUnicast(t *testing.T) {
 		Body: testTransaction.GetBody(),
 		Peer: peerA,
 	}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 
 	b, err := proto.Marshal(testTransaction)
 	require.NoError(t, err)
 	mgrA.Send(b)
-
 	time.Sleep(graceTime)
-	eventMock.AssertExpectations(t)
 }
 
 func TestBroadcast(t *testing.T) {
-	mgrA, closeA, peerA := newTest(t, "A3")
+	defer assertEvents(t)()
+
+	mgrA, closeA, peerA := newTest(t, "A")
 	defer closeA()
 	mgrB, closeB, peerB := newTest(t, "B")
 	defer closeB()
@@ -123,6 +142,8 @@ func TestBroadcast(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(4)
 
+	// connect in the following way
+	// B -> A <- C
 	go func() {
 		defer wg.Done()
 		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
@@ -152,17 +173,20 @@ func TestBroadcast(t *testing.T) {
 		Body: testTransaction.GetBody(),
 		Peer: peerA,
 	}).Twice()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Twice()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerC}).Once()
 
 	b, err := proto.Marshal(testTransaction)
 	require.NoError(t, err)
 	mgrA.Send(b)
-
 	time.Sleep(graceTime)
-	eventMock.AssertExpectations(t)
 }
 
 func TestDropUnsuccessfulAccept(t *testing.T) {
-	mgrA, closeA, _ := newTest(t, "A4")
+	defer assertEvents(t)()
+
+	mgrA, closeA, _ := newTest(t, "A")
 	defer closeA()
 	_, closeB, peerB := newTest(t, "B")
 	defer closeB()
@@ -173,12 +197,12 @@ func TestDropUnsuccessfulAccept(t *testing.T) {
 
 	err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
 	assert.Error(t, err)
-
-	eventMock.AssertExpectations(t)
 }
 
 func TestTxRequest(t *testing.T) {
-	mgrA, closeA, peerA := newTest(t, "A5")
+	defer assertEvents(t)()
+
+	mgrA, closeA, peerA := newTest(t, "A")
 	defer closeA()
 	mgrB, closeB, peerB := newTest(t, "B")
 	defer closeB()
@@ -186,6 +210,8 @@ func TestTxRequest(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// connect in the following way
+	// B -> A
 	go func() {
 		defer wg.Done()
 		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
@@ -205,11 +231,11 @@ func TestTxRequest(t *testing.T) {
 		Body: testTransaction.GetBody(),
 		Peer: peerB,
 	}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 
 	b, err := proto.Marshal(&pb.TransactionRequest{Hash: []byte("Hello!")})
 	require.NoError(t, err)
 	mgrA.RequestTransaction(b)
-
 	time.Sleep(graceTime)
-	eventMock.AssertExpectations(t)
 }

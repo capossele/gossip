@@ -2,8 +2,8 @@ package gossip
 
 import (
 	"net"
+	"sync"
 
-	"github.com/capossele/gossip/neighbor"
 	pb "github.com/capossele/gossip/proto"
 	"github.com/capossele/gossip/transport"
 	"github.com/golang/protobuf/proto"
@@ -19,22 +19,79 @@ const (
 type GetTransaction func(txHash []byte) ([]byte, error)
 
 type Manager struct {
-	neighborhood   *neighbor.NeighborMap
 	trans          *transport.TransportTCP
 	log            *zap.SugaredLogger
 	getTransaction GetTransaction
+
+	wg sync.WaitGroup
+
+	mu        sync.RWMutex
+	neighbors map[peer.ID]*neighbor
+	running   bool
+}
+
+type neighbor struct {
+	peer *peer.Peer
+	conn *transport.Connection
 }
 
 func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
-	return &Manager{
-		neighborhood:   neighbor.NewMap(),
+	m := &Manager{
 		trans:          t,
 		log:            log,
 		getTransaction: f,
+		neighbors:      make(map[peer.ID]*neighbor),
 	}
+
+	m.running = true
+	return m
 }
 
-func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.running = false
+	// close all connections
+	for _, n := range m.neighbors {
+		n.conn.Close()
+	}
+	m.mu.Unlock()
+
+	m.wg.Wait()
+}
+
+func (m *Manager) getNeighbors(ids ...peer.ID) []*neighbor {
+	if len(ids) > 0 {
+		return m.getNeighborsById(ids)
+	}
+	return m.getAllNeighbors()
+}
+
+func (m *Manager) getAllNeighbors() []*neighbor {
+	m.mu.Lock()
+	result := make([]*neighbor, 0, len(m.neighbors))
+	for _, n := range m.neighbors {
+		result = append(result, n)
+	}
+	m.mu.Unlock()
+
+	return result
+}
+
+func (m *Manager) getNeighborsById(ids []peer.ID) []*neighbor {
+	result := make([]*neighbor, 0, len(ids))
+
+	m.mu.RLock()
+	for _, id := range ids {
+		if n, ok := m.neighbors[id]; ok {
+			result = append(result, n)
+		}
+	}
+	m.mu.RUnlock()
+
+	return result
+}
+
+func (m *Manager) RequestTransaction(data []byte, to ...peer.ID) {
 	req := &pb.TransactionRequest{}
 	err := proto.Unmarshal(data, req)
 	if err != nil {
@@ -45,7 +102,7 @@ func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
 	m.send(msg, to...)
 }
 
-func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
+func (m *Manager) Send(data []byte, to ...peer.ID) {
 	tx := &pb.Transaction{}
 	err := proto.Unmarshal(data, tx)
 	if err != nil {
@@ -56,15 +113,12 @@ func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
 	m.send(msg, to...)
 }
 
-func (m *Manager) send(msg []byte, to ...*neighbor.Neighbor) {
-	neighbors := m.neighborhood.GetSlice()
-	if to != nil {
-		neighbors = to
-	}
+func (m *Manager) send(msg []byte, to ...peer.ID) {
+	neighbors := m.getNeighbors(to...)
 
 	for _, n := range neighbors {
-		m.log.Debugw("Sending", "to", n.Peer.ID().String(), "msg", msg)
-		err := n.Conn.Write(msg)
+		m.log.Debugw("Sending", "to", n.peer.ID(), "msg", msg)
+		err := n.conn.Write(msg)
 		if err != nil {
 			m.log.Debugw("send error", "err", err)
 		}
@@ -72,10 +126,6 @@ func (m *Manager) send(msg []byte, to ...*neighbor.Neighbor) {
 }
 
 func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*transport.Connection, error)) error {
-	if _, ok := m.neighborhood.Load(peer.ID().String()); ok {
-		return errors.New("Neighbor already added")
-	}
-
 	var err error
 	var conn *transport.Connection
 	i := 0
@@ -93,26 +143,46 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 		return err
 	}
 
-	// add the new n
-	n := neighbor.New(peer, conn)
-	m.neighborhood.Store(peer.ID().String(), n)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.running {
+		conn.Close()
+		return errors.New("manager closed")
+	}
+	if _, ok := m.neighbors[peer.ID()]; ok {
+		conn.Close()
+		return errors.New("manager closed")
+	}
 
-	// start listener for the new n
+	n := &neighbor{
+		peer: peer,
+		conn: conn,
+	}
+	m.neighbors[peer.ID()] = n
 	go m.readLoop(n)
 
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
-	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
+func (m *Manager) deleteNeighbor(peer *peer.Peer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.neighbors[peer.ID()]; !ok {
+		return
+	}
 
-	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
-	m.neighborhood.Delete(n.Peer.ID().String())
+	n := m.neighbors[peer.ID()]
+	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.peer})
+	n.conn.Close()
+	delete(m.neighbors, peer.ID())
 }
 
-func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
+func (m *Manager) readLoop(n *neighbor) {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
 	for {
-		data, err := neighbor.Conn.Read()
+		data, err := n.conn.Read()
 		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 			// ignore temporary read errors.
 			m.log.Debugw("temporary read error", "err", err)
@@ -120,16 +190,18 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 		} else if err != nil {
 			// return from the loop on all other errors
 			m.log.Debugw("read error", "err", err)
-			m.deleteNeighbor(neighbor)
+			n.conn.Close()
+			m.deleteNeighbor(n.peer)
 			return
 		}
-		if err := m.handlePacket(data, neighbor); err != nil {
-			m.log.Warnw("failed to handle packet", "from", neighbor.Peer.ID().String(), "err", err)
+
+		if err := m.handlePacket(data, n); err != nil {
+			m.log.Warnw("failed to handle packet", "id", n.peer.ID(), "err", err)
 		}
 	}
 }
 
-func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
+func (m *Manager) handlePacket(data []byte, n *neighbor) error {
 	switch pb.MType(data[0]) {
 
 	// Incoming Transaction
@@ -139,7 +211,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: neighbor.Peer})
+		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: n.peer})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:
@@ -154,7 +226,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 			m.log.Debugw("Tx not available", "tx", msg.GetHash())
 		} else {
 			m.log.Debugw("Tx found", "tx", tx)
-			m.Send(tx, neighbor)
+			m.Send(tx, n.peer.ID())
 		}
 
 	default:
