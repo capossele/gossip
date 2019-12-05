@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"container/list"
 	"errors"
+	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +19,7 @@ import (
 
 var (
 	ErrTimeout          = errors.New("accept timeout")
-	ErrClosed           = errors.New("listener closed")
+	ErrClosed           = errors.New("transport closed")
 	ErrInvalidHandshake = errors.New("invalid handshake")
 	ErrNoGossip         = errors.New("peer does not have a gossip service")
 )
@@ -254,7 +256,10 @@ func (t *TransportTCP) listenLoop() {
 			continue
 		} else if err != nil {
 			// return from the loop on all other errors
-			t.log.Warnw("read error", "err", err)
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+				t.log.Warnw("listen error", "err", err)
+			}
+			t.log.Debug("listening stopped")
 			return
 		}
 
@@ -317,13 +322,9 @@ func (t *TransportTCP) doHandshake(key peer.PublicKey, remoteAddr string, conn n
 	}
 
 	signer, err := peer.RecoverKeyFromSignedData(pkt)
-	if err != nil {
-		return err
+	if err != nil || !bytes.Equal(key, signer) {
+		return ErrInvalidHandshake
 	}
-	if !bytes.Equal(key, signer) {
-		return errors.New("invalid key")
-	}
-
 	if !t.validateHandshakeResponse(pkt.GetData(), reqData) {
 		return ErrInvalidHandshake
 	}
