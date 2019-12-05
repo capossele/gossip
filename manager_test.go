@@ -95,7 +95,7 @@ func TestUnicast(t *testing.T) {
 	sendChan := make(chan struct{})
 	sendSuccess := false
 
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
 		logger.Debugw("New TX Event triggered", "data", ev.Body)
 		assert.Equal(t, tx.GetBody(), ev.Body)
 		sendChan <- struct{}{}
@@ -126,15 +126,6 @@ func TestBroadcast(t *testing.T) {
 	mgrC, closeC, peerC := newTest(t, "C", "127.0.0.1:0")
 	defer closeC()
 
-	tx := &pb.Transaction{
-		Body: []byte("Hello!"),
-	}
-
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		logger.Debugw("New TX Event triggered", "data", ev.Body)
-		assert.Equal(t, tx.GetBody(), ev.Body)
-	}))
-
 	var wg sync.WaitGroup
 	wg.Add(3)
 
@@ -161,12 +152,40 @@ func TestBroadcast(t *testing.T) {
 
 	wg.Wait()
 
+	tx := &pb.Transaction{
+		Body: []byte("Hello!"),
+	}
 	b, err := proto.Marshal(tx)
 	assert.NoError(t, err)
 
+	sendChan := make(chan struct{}, 2)
+	sendSuccess := false
+
+	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		assert.Equal(t, tx.GetBody(), ev.Body)
+		sendChan <- struct{}{}
+	}))
+
+	mgrC.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		assert.Equal(t, tx.GetBody(), ev.Body)
+		sendChan <- struct{}{}
+	}))
+
 	mgrA.Send(b)
 
-	time.Sleep(1 * time.Second)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sendChan:
+		sendSuccess = true
+	case <-timer.C:
+		sendSuccess = false
+	}
+
+	assert.True(t, sendSuccess)
 }
 
 func TestDrop(t *testing.T) {
@@ -179,7 +198,7 @@ func TestDrop(t *testing.T) {
 	doneChan := make(chan struct{}, 2)
 	dropSuccess := false
 
-	Events.DropNeighbor.Attach(events.NewClosure(func(ev *DropNeighborEvent) {
+	mgrA.Events.DropNeighbor.Attach(events.NewClosure(func(ev *DropNeighborEvent) {
 		logger.Debugw("Drop Event triggered", "peer", ev.Peer)
 		assert.Equal(t, peerB, ev.Peer)
 		doneChan <- struct{}{}
@@ -237,7 +256,7 @@ func TestTxRequest(t *testing.T) {
 	sendChan := make(chan struct{})
 	sendSuccess := false
 
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+	mgrA.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
 		logger.Debugw("New TX Event triggered", "data", ev.Body)
 		assert.Equal(t, []byte("testTx"), ev.Body)
 		sendChan <- struct{}{}

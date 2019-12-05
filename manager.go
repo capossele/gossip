@@ -9,6 +9,7 @@ import (
 	"github.com/capossele/gossip/transport"
 	"github.com/golang/protobuf/proto"
 	"github.com/iotaledger/autopeering-sim/peer"
+	"github.com/iotaledger/hive.go/events"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -24,6 +25,7 @@ type Manager struct {
 	trans          *transport.TransportTCP
 	log            *zap.SugaredLogger
 	getTransaction GetTransaction
+	Events         Events
 }
 
 func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
@@ -32,6 +34,9 @@ func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransact
 		trans:          t,
 		log:            log,
 		getTransaction: f,
+		Events: Events{
+			NewTransaction: events.NewEvent(newTransaction),
+			DropNeighbor:   events.NewEvent(dropNeighbor)},
 	}
 }
 
@@ -90,7 +95,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	}
 	if i == maxAttempts {
 		m.log.Warnw("Connection failed to", "peer", peer.ID().String())
-		Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
+		m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
 		return err
 	}
 
@@ -107,7 +112,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
 	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
 
-	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
+	m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
 
 	m.neighborhood.Delete(n.Peer.ID().String())
 }
@@ -146,7 +151,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody()})
+		m.Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody()})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:
