@@ -27,7 +27,11 @@ func init() {
 	logger = l.Sugar()
 }
 func testGetTransaction(h []byte) ([]byte, error) {
-	return []byte("testTx"), nil
+	tx := &pb.TransactionRequest{
+		Hash: []byte("testTx"),
+	}
+	b, _ := proto.Marshal(tx)
+	return b, nil
 }
 
 func newTest(t require.TestingT, name string, address string) (*Manager, func(), *peer.Peer) {
@@ -197,4 +201,59 @@ func TestDrop(t *testing.T) {
 	}
 
 	assert.True(t, dropSuccess)
+}
+
+func TestTxRequest(t *testing.T) {
+	mgrA, closeA, peerA := newTest(t, "A", "127.0.0.1:0")
+	defer closeA()
+
+	mgrB, closeB, peerB := newTest(t, "B", "127.0.0.1:0")
+	defer closeB()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrA.neighborhood.Len())
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrB.neighborhood.Len())
+	}()
+
+	wg.Wait()
+
+	tx := &pb.TransactionRequest{
+		Hash: []byte("Hello!"),
+	}
+	b, err := proto.Marshal(tx)
+	assert.NoError(t, err)
+
+	sendChan := make(chan struct{})
+	sendSuccess := false
+
+	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		assert.Equal(t, []byte("testTx"), ev.Body)
+		sendChan <- struct{}{}
+	}))
+
+	mgrA.RequestTransaction(b)
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sendChan:
+		sendSuccess = true
+	case <-timer.C:
+		sendSuccess = false
+	}
+
+	assert.True(t, sendSuccess)
 }

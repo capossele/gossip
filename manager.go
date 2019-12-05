@@ -18,6 +18,7 @@ const (
 )
 
 type GetTransaction func(txHash []byte) ([]byte, error)
+
 type Manager struct {
 	neighborhood   *neighbor.NeighborMap
 	trans          *transport.TransportTCP
@@ -34,6 +35,17 @@ func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransact
 	}
 }
 
+func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
+	req := &pb.TransactionRequest{}
+	err := proto.Unmarshal(data, req)
+	if err != nil {
+		m.log.Warnw("Data to send is not a Transaction Request", "err", err)
+	}
+	msg := marshal(req)
+
+	m.send(msg, to...)
+}
+
 func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
 	tx := &pb.Transaction{}
 	err := proto.Unmarshal(data, tx)
@@ -42,16 +54,20 @@ func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
 	}
 	msg := marshal(tx)
 
+	m.send(msg, to...)
+}
+
+func (m *Manager) send(msg []byte, to ...*neighbor.Neighbor) {
 	neighbors := m.neighborhood.GetSlice()
 	if to != nil {
 		neighbors = to
 	}
 
 	for _, neighbor := range neighbors {
-		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "data", data, "body", tx.GetBody())
+		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "msg", msg)
 		err := neighbor.Conn.Write(msg)
 		if err != nil {
-			m.log.Debugw("Send error", "err", err)
+			m.log.Debugw("send error", "err", err)
 		}
 	}
 }
@@ -144,6 +160,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 		if err != nil {
 			m.log.Debugw("Tx not available", "tx", msg.GetHash())
 		} else {
+			m.log.Debugw("Tx found", "tx", tx)
 			m.Send(tx, neighbor)
 		}
 
