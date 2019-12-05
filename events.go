@@ -11,11 +11,6 @@ type Events struct {
 	DropNeighbor   *events.Event
 }
 
-// {
-// 	NewTransaction: events.NewEvent(newTransaction),
-// 	DropNeighbor:   events.NewEvent(dropNeighbor),
-// }
-
 type NewTransactionEvent struct {
 	Body []byte
 }
