@@ -8,7 +8,6 @@ import (
 	"github.com/capossele/gossip/transport"
 	"github.com/golang/protobuf/proto"
 	"github.com/iotaledger/autopeering-sim/peer"
-	"github.com/iotaledger/hive.go/events"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -24,7 +23,6 @@ type Manager struct {
 	trans          *transport.TransportTCP
 	log            *zap.SugaredLogger
 	getTransaction GetTransaction
-	Events         Events
 }
 
 func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
@@ -33,9 +31,6 @@ func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransact
 		trans:          t,
 		log:            log,
 		getTransaction: f,
-		Events: Events{
-			NewTransaction: events.NewEvent(newTransaction),
-			DropNeighbor:   events.NewEvent(dropNeighbor)},
 	}
 }
 
@@ -67,9 +62,9 @@ func (m *Manager) send(msg []byte, to ...*neighbor.Neighbor) {
 		neighbors = to
 	}
 
-	for _, neighbor := range neighbors {
-		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "msg", msg)
-		err := neighbor.Conn.Write(msg)
+	for _, n := range neighbors {
+		m.log.Debugw("Sending", "to", n.Peer.ID().String(), "msg", msg)
+		err := n.Conn.Write(msg)
 		if err != nil {
 			m.log.Debugw("send error", "err", err)
 		}
@@ -94,16 +89,16 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	}
 	if i == maxAttempts {
 		m.log.Warnw("Connection failed to", "peer", peer.ID().String())
-		m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
+		Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
 		return err
 	}
 
-	// add the new neighbor
-	neighbor := neighbor.New(peer, conn)
-	m.neighborhood.Store(peer.ID().String(), neighbor)
+	// add the new n
+	n := neighbor.New(peer, conn)
+	m.neighborhood.Store(peer.ID().String(), n)
 
-	// start listener for the new neighbor
-	go m.readLoop(neighbor)
+	// start listener for the new n
+	go m.readLoop(n)
 
 	return nil
 }
@@ -111,8 +106,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
 	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
 
-	m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
-
+	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
 	m.neighborhood.Delete(n.Peer.ID().String())
 }
 
@@ -121,13 +115,12 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 		data, err := neighbor.Conn.Read()
 		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 			// ignore temporary read errors.
-			//m.log.Debugw("temporary read error", "err", err)
+			m.log.Debugw("temporary read error", "err", err)
 			continue
 		} else if err != nil {
 			// return from the loop on all other errors
-			m.log.Debugw("reading stopped")
+			m.log.Debugw("read error", "err", err)
 			m.deleteNeighbor(neighbor)
-
 			return
 		}
 		if err := m.handlePacket(data, neighbor); err != nil {
@@ -146,7 +139,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		m.Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: neighbor.Peer})
+		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: neighbor.Peer})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:
