@@ -17,6 +17,10 @@ const (
 	maxAttempts = 3
 )
 
+var (
+	Event Events
+)
+
 type GetTransaction func(txHash []byte) ([]byte, error)
 
 type Manager struct {
@@ -28,7 +32,7 @@ type Manager struct {
 }
 
 func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
-	return &Manager{
+	mgr := &Manager{
 		neighborhood:   neighbor.NewMap(),
 		trans:          t,
 		log:            log,
@@ -37,6 +41,8 @@ func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransact
 			NewTransaction: events.NewEvent(newTransaction),
 			DropNeighbor:   events.NewEvent(dropNeighbor)},
 	}
+	Event = mgr.Events
+	return mgr
 }
 
 func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
