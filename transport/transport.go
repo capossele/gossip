@@ -44,7 +44,7 @@ type TransportTCP struct {
 
 // connect contains the result of an incoming connection.
 type connect struct {
-	c   *connection
+	c   *Connection
 	err error
 }
 
@@ -108,7 +108,7 @@ func (t *TransportTCP) LocalAddr() net.Addr {
 
 // DialPeer establishes a gossip connection to the given peer.
 // If the peer does not accept the connection or the handshake fails, an error is returned.
-func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
+func (t *TransportTCP) DialPeer(p *peer.Peer) (*Connection, error) {
 	gossipAddr := p.Services().Get(service.GossipKey)
 	if gossipAddr == nil {
 		return nil, ErrNoGossip
@@ -130,7 +130,7 @@ func (t *TransportTCP) DialPeer(p *peer.Peer) (*connection, error) {
 
 // AcceptPeer awaits an incoming connection from the given peer.
 // If the peer does not establish the connection or the handshake fails, an error is returned.
-func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*connection, error) {
+func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*Connection, error) {
 	if p.Services().Get(service.GossipKey) == nil {
 		return nil, ErrNoGossip
 	}
