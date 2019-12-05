@@ -24,6 +24,10 @@ func newConnection(p *peer.Peer, c net.Conn) *Connection {
 	}
 }
 
+func (c *Connection) Peer() *peer.Peer {
+	return c.peer
+}
+
 func (c *Connection) Close() {
 	c.conn.Close()
 }
