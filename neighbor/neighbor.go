@@ -13,7 +13,7 @@ type Neighbor struct {
 	Conn *transport.Connection
 }
 
-// NeighborMap implements a map of neighbors thraed safe
+// NeighborMap implements a map of neighbors thread safe
 type NeighborMap struct {
 	sync.RWMutex
 	internal map[string]*Neighbor
