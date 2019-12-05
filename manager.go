@@ -1,7 +1,6 @@
 package gossip
 
 import (
-	"io"
 	"net"
 
 	"github.com/capossele/gossip/neighbor"
@@ -126,11 +125,7 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 			continue
 		} else if err != nil {
 			// return from the loop on all other errors
-			if err != io.EOF {
-				m.log.Warnw("read error", "err", err)
-			}
 			m.log.Debugw("reading stopped")
-
 			m.deleteNeighbor(neighbor)
 
 			return
@@ -151,7 +146,7 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		m.Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody()})
+		m.Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: neighbor.Peer})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:

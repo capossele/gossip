@@ -13,6 +13,7 @@ type Events struct {
 
 type NewTransactionEvent struct {
 	Body []byte
+	Peer *peer.Peer
 }
 type DropNeighborEvent struct {
 	Peer *peer.Peer

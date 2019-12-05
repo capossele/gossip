@@ -96,8 +96,9 @@ func TestUnicast(t *testing.T) {
 	sendSuccess := false
 
 	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		logger.Debugw("New TX Event triggered", "data", ev.Body, "from", ev.Peer.ID().String())
 		assert.Equal(t, tx.GetBody(), ev.Body)
+		assert.Equal(t, peerA, ev.Peer)
 		sendChan <- struct{}{}
 	}))
 
@@ -162,14 +163,16 @@ func TestBroadcast(t *testing.T) {
 	sendSuccess := false
 
 	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		logger.Debugw("New TX Event triggered", "data", ev.Body, "from", ev.Peer.ID().String())
 		assert.Equal(t, tx.GetBody(), ev.Body)
+		assert.Equal(t, peerA, ev.Peer)
 		sendChan <- struct{}{}
 	}))
 
 	mgrC.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		logger.Debugw("New TX Event triggered", "data", ev.Body, "from", ev.Peer.ID().String())
 		assert.Equal(t, tx.GetBody(), ev.Body)
+		assert.Equal(t, peerA, ev.Peer)
 		sendChan <- struct{}{}
 	}))
 
@@ -257,8 +260,9 @@ func TestTxRequest(t *testing.T) {
 	sendSuccess := false
 
 	mgrA.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		logger.Debugw("New TX Event triggered", "data", ev.Body)
+		logger.Debugw("New TX Event triggered", "data", ev.Body, "from", ev.Peer.ID().String())
 		assert.Equal(t, []byte("testTx"), ev.Body)
+		assert.Equal(t, peerB, ev.Peer)
 		sendChan <- struct{}{}
 	}))
 
