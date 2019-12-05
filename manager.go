@@ -111,13 +111,13 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 
 			return
 		}
-		if err := m.handlePacket(data, neighbor); err != nil {
+		if err := m.handlePacket(data); err != nil {
 			m.log.Warnw("failed to handle packet", "from", neighbor.Peer.ID().String(), "err", err)
 		}
 	}
 }
 
-func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
+func (m *Manager) handlePacket(data []byte) error {
 	switch pb.MType(data[0]) {
 
 	// Incoming Transaction
@@ -143,7 +143,6 @@ func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 	}
 
 	return nil
-
 }
 
 func marshal(msg pb.Message) []byte {
