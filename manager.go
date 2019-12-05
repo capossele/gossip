@@ -1,7 +1,6 @@
 package gossip
 
 import (
-	"io"
 	"net"
 
 	"github.com/capossele/gossip/neighbor"
@@ -9,6 +8,7 @@ import (
 	"github.com/capossele/gossip/transport"
 	"github.com/golang/protobuf/proto"
 	"github.com/iotaledger/autopeering-sim/peer"
+	"github.com/iotaledger/hive.go/events"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -17,18 +17,37 @@ const (
 	maxAttempts = 3
 )
 
+type GetTransaction func(txHash []byte) ([]byte, error)
+
 type Manager struct {
-	neighborhood *neighbor.NeighborMap
-	trans        *transport.TransportTCP
-	log          *zap.SugaredLogger
+	neighborhood   *neighbor.NeighborMap
+	trans          *transport.TransportTCP
+	log            *zap.SugaredLogger
+	getTransaction GetTransaction
+	Events         Events
 }
 
-func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger) *Manager {
+func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
 	return &Manager{
-		neighborhood: neighbor.NewMap(),
-		trans:        t,
-		log:          log,
+		neighborhood:   neighbor.NewMap(),
+		trans:          t,
+		log:            log,
+		getTransaction: f,
+		Events: Events{
+			NewTransaction: events.NewEvent(newTransaction),
+			DropNeighbor:   events.NewEvent(dropNeighbor)},
 	}
+}
+
+func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
+	req := &pb.TransactionRequest{}
+	err := proto.Unmarshal(data, req)
+	if err != nil {
+		m.log.Warnw("Data to send is not a Transaction Request", "err", err)
+	}
+	msg := marshal(req)
+
+	m.send(msg, to...)
 }
 
 func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
@@ -39,16 +58,20 @@ func (m *Manager) Send(data []byte, to ...*neighbor.Neighbor) {
 	}
 	msg := marshal(tx)
 
+	m.send(msg, to...)
+}
+
+func (m *Manager) send(msg []byte, to ...*neighbor.Neighbor) {
 	neighbors := m.neighborhood.GetSlice()
 	if to != nil {
 		neighbors = to
 	}
 
 	for _, neighbor := range neighbors {
-		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "data", data, "body", tx.GetBody())
+		m.log.Debugw("Sending", "to", neighbor.Peer.ID().String(), "msg", msg)
 		err := neighbor.Conn.Write(msg)
 		if err != nil {
-			m.log.Debugw("Send error", "err", err)
+			m.log.Debugw("send error", "err", err)
 		}
 	}
 }
@@ -71,7 +94,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	}
 	if i == maxAttempts {
 		m.log.Warnw("Connection failed to", "peer", peer.ID().String())
-		Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
+		m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
 		return err
 	}
 
@@ -88,7 +111,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
 	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
 
-	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
+	m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
 
 	m.neighborhood.Delete(n.Peer.ID().String())
 }
@@ -102,22 +125,18 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 			continue
 		} else if err != nil {
 			// return from the loop on all other errors
-			if err != io.EOF {
-				m.log.Warnw("read error", "err", err)
-			}
 			m.log.Debugw("reading stopped")
-
 			m.deleteNeighbor(neighbor)
 
 			return
 		}
-		if err := m.handlePacket(data); err != nil {
+		if err := m.handlePacket(data, neighbor); err != nil {
 			m.log.Warnw("failed to handle packet", "from", neighbor.Peer.ID().String(), "err", err)
 		}
 	}
 }
 
-func (m *Manager) handlePacket(data []byte) error {
+func (m *Manager) handlePacket(data []byte, neighbor *neighbor.Neighbor) error {
 	switch pb.MType(data[0]) {
 
 	// Incoming Transaction
@@ -127,7 +146,7 @@ func (m *Manager) handlePacket(data []byte) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody()})
+		m.Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: neighbor.Peer})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:
@@ -137,6 +156,13 @@ func (m *Manager) handlePacket(data []byte) error {
 		}
 		m.log.Debugw("Received Tx Req", "data", msg.GetHash())
 		// do something
+		tx, err := m.getTransaction(msg.GetHash())
+		if err != nil {
+			m.log.Debugw("Tx not available", "tx", msg.GetHash())
+		} else {
+			m.log.Debugw("Tx found", "tx", tx)
+			m.Send(tx, neighbor)
+		}
 
 	default:
 		return nil

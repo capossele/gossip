@@ -28,6 +28,13 @@ func init() {
 	}
 	logger = l.Sugar()
 }
+func testGetTransaction([]byte) ([]byte, error) {
+	tx := &pb.TransactionRequest{
+		Hash: []byte("testTx"),
+	}
+	b, _ := proto.Marshal(tx)
+	return b, nil
+}
 
 func newTest(t require.TestingT, name string) (*Manager, func(), *peer.Peer) {
 	log := logger.Named(name)
@@ -39,7 +46,7 @@ func newTest(t require.TestingT, name string) (*Manager, func(), *peer.Peer) {
 	trans, err := transport.Listen(local, log)
 	require.NoError(t, err)
 
-	mgr := NewManager(trans, log)
+	mgr := NewManager(trans, log, testGetTransaction)
 
 	// update the service with the actual address
 	require.NoError(t, local.UpdateService(service.GossipKey, trans.LocalAddr().Network(), trans.LocalAddr().String()))
@@ -83,9 +90,10 @@ func TestUnicast(t *testing.T) {
 	tx := &pb.Transaction{Body: []byte("Hello!")}
 
 	triggered := make(chan struct{}, 1)
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
 		require.Empty(t, triggered) // only once
 		assert.Equal(t, tx.GetBody(), ev.Body)
+		assert.Equal(t, peerA, ev.Peer)
 		triggered <- struct{}{}
 	}))
 
@@ -94,7 +102,7 @@ func TestUnicast(t *testing.T) {
 	mgrA.Send(b)
 
 	// eventually the event should be triggered
-	assert.Eventually(t, func() bool { _, ok := <-triggered; return ok }, time.Second, 10*time.Millisecond)
+	assert.Eventually(t, func() bool { return len(triggered) >= 1 }, time.Second, 10*time.Millisecond)
 }
 
 func TestBroadcast(t *testing.T) {
@@ -135,20 +143,31 @@ func TestBroadcast(t *testing.T) {
 
 	tx := &pb.Transaction{Body: []byte("Hello!")}
 
-	triggered := make(chan struct{}, 2)
-	Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
-		require.Less(t, len(triggered), 2) // triggered at most twice
+	triggeredB := make(chan struct{}, 1)
+	mgrB.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		require.Empty(t, triggeredB) // only once
 		assert.Equal(t, tx.GetBody(), ev.Body)
-		triggered <- struct{}{}
+		assert.Equal(t, peerA, ev.Peer)
+		triggeredB <- struct{}{}
+	}))
+
+	triggeredC := make(chan struct{}, 1)
+	mgrC.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		require.Empty(t, triggeredC) // only once
+		assert.Equal(t, tx.GetBody(), ev.Body)
+		assert.Equal(t, peerA, ev.Peer)
+		triggeredC <- struct{}{}
 	}))
 
 	b, err := proto.Marshal(tx)
 	assert.NoError(t, err)
-	// send the message to A and B
 	mgrA.Send(b)
 
-	// eventually the event should be triggered twice
-	assert.Eventually(t, func() bool { return len(triggered) == 2 }, time.Second, 10*time.Millisecond)
+	// eventually the events should be triggered
+	success := func() bool {
+		return len(triggeredB) >= 1 && len(triggeredC) >= 1
+	}
+	assert.Eventually(t, success, time.Second, 10*time.Millisecond)
 }
 
 func TestDropUnsuccessfulAccept(t *testing.T) {
@@ -158,7 +177,7 @@ func TestDropUnsuccessfulAccept(t *testing.T) {
 	defer closeB()
 
 	triggered := make(chan struct{}, 1)
-	Events.DropNeighbor.Attach(events.NewClosure(func(ev *DropNeighborEvent) {
+	mgrA.Events.DropNeighbor.Attach(events.NewClosure(func(ev *DropNeighborEvent) {
 		require.Empty(t, triggered) // only once
 		assert.Equal(t, peerB, ev.Peer)
 		triggered <- struct{}{}
@@ -168,5 +187,60 @@ func TestDropUnsuccessfulAccept(t *testing.T) {
 	assert.Error(t, err)
 
 	// eventually the event should be triggered
-	assert.Eventually(t, func() bool { _, ok := <-triggered; return ok }, time.Second, 10*time.Millisecond)
+	assert.Eventually(t, func() bool { return len(triggered) >= 1 }, time.Second, 10*time.Millisecond)
+}
+
+func TestTxRequest(t *testing.T) {
+	mgrA, closeA, peerA := newTest(t, "A")
+	defer closeA()
+	mgrB, closeB, peerB := newTest(t, "B")
+	defer closeB()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrA.neighborhood.Len())
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		assert.NoError(t, err)
+		logger.Debugw("Len", "len", mgrB.neighborhood.Len())
+	}()
+
+	wg.Wait()
+
+	tx := &pb.TransactionRequest{
+		Hash: []byte("Hello!"),
+	}
+	b, err := proto.Marshal(tx)
+	assert.NoError(t, err)
+
+	sendChan := make(chan struct{})
+	sendSuccess := false
+
+	mgrA.Events.NewTransaction.Attach(events.NewClosure(func(ev *NewTransactionEvent) {
+		logger.Debugw("New TX Event triggered", "data", ev.Body, "from", ev.Peer.ID().String())
+		assert.Equal(t, []byte("testTx"), ev.Body)
+		assert.Equal(t, peerB, ev.Peer)
+		sendChan <- struct{}{}
+	}))
+
+	mgrA.RequestTransaction(b)
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sendChan:
+		sendSuccess = true
+	case <-timer.C:
+		sendSuccess = false
+	}
+
+	assert.True(t, sendSuccess)
 }

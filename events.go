@@ -6,16 +6,14 @@ import (
 )
 
 // Events contains all the events that are triggered during the gossip protocol.
-var Events = struct {
+type Events struct {
 	NewTransaction *events.Event
 	DropNeighbor   *events.Event
-}{
-	NewTransaction: events.NewEvent(newTransaction),
-	DropNeighbor:   events.NewEvent(dropNeighbor),
 }
 
 type NewTransactionEvent struct {
 	Body []byte
+	Peer *peer.Peer
 }
 type DropNeighborEvent struct {
 	Peer *peer.Peer
