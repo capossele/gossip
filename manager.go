@@ -45,6 +45,18 @@ func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransact
 	return mgr
 }
 
+func (m *Manager) AddOutbound(p *peer.Peer) error {
+	return m.addNeighbor(p, m.trans.DialPeer)
+}
+
+func (m *Manager) AddInbound(p *peer.Peer) error {
+	return m.addNeighbor(p, m.trans.AcceptPeer)
+}
+
+func (m *Manager) DropNeighbor(id peer.ID) {
+	m.deleteNeighbor(id)
+}
+
 func (m *Manager) RequestTransaction(data []byte, to ...*neighbor.Neighbor) {
 	req := &pb.TransactionRequest{}
 	err := proto.Unmarshal(data, req)
@@ -114,12 +126,13 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(n *neighbor.Neighbor) {
-	m.log.Debugw("Deleting neighbor", "neighbor", n.Peer.ID().String())
+func (m *Manager) deleteNeighbor(id peer.ID) {
+	m.log.Debugw("Deleting neighbor", "neighbor", id.String())
 
-	m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: n.Peer})
-
-	m.neighborhood.Delete(n.Peer.ID().String())
+	p, ok := m.neighborhood.Delete(id.String())
+	if ok {
+		m.Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: p.Peer})
+	}
 }
 
 func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
@@ -132,7 +145,7 @@ func (m *Manager) readLoop(neighbor *neighbor.Neighbor) {
 		} else if err != nil {
 			// return from the loop on all other errors
 			m.log.Debugw("reading stopped")
-			m.deleteNeighbor(neighbor)
+			m.deleteNeighbor(neighbor.Peer.ID())
 
 			return
 		}
