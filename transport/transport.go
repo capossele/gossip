@@ -144,6 +144,7 @@ func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*Connection, error) {
 	if connected.err != nil {
 		return nil, connected.err
 	}
+
 	t.log.Debugw("connected", "id", p.ID(), "addr", connected.c.RemoteAddr(), "direction", "in")
 	return connected.c, nil
 }
