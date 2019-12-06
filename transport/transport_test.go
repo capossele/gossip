@@ -33,7 +33,7 @@ func newTest(t require.TestingT, name string) (*TransportTCP, func()) {
 	require.NoError(t, err)
 
 	// enable TCP gossipping
-	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", ":0"))
+	require.NoError(t, local.UpdateService(service.GossipKey, "tcp", "localhost:0"))
 
 	trans, err := Listen(local, l)
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestUnansweredDial(t *testing.T) {
 
 	// create peer with invalid gossip address
 	services := getPeer(transA).Services().CreateRecord()
-	services.Update(service.GossipKey, "tcp", ":0")
+	services.Update(service.GossipKey, "tcp", "localhost:0")
 	unreachablePeer := peer.NewPeer(getPeer(transA).PublicKey(), services)
 
 	_, err := transA.DialPeer(unreachablePeer)
@@ -99,7 +99,7 @@ func TestNoHandshakeResponse(t *testing.T) {
 	defer closeA()
 
 	// accept and read incoming connections
-	lis, err := net.Listen("tcp", ":0")
+	lis, err := net.Listen("tcp", "localhost:0")
 	require.NoError(t, err)
 	go func() {
 		conn, err := lis.Accept()
