@@ -3,7 +3,7 @@ package transport
 import (
 	"bytes"
 	"container/list"
-	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -14,6 +14,7 @@ import (
 	"github.com/iotaledger/autopeering-sim/peer"
 	"github.com/iotaledger/autopeering-sim/peer/service"
 	pb "github.com/iotaledger/autopeering-sim/server/proto"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +30,8 @@ const (
 	acceptTimeout     = 500 * time.Millisecond
 	handshakeTimeout  = 100 * time.Millisecond
 	connectionTimeout = acceptTimeout + handshakeTimeout
+
+	maxHandshakePacketSize = 256
 )
 
 type TransportTCP struct {
@@ -127,7 +130,7 @@ func (t *TransportTCP) DialPeer(p *peer.Peer) (*Connection, error) {
 	}
 
 	t.log.Debugw("connected", "id", p.ID(), "addr", conn.RemoteAddr(), "direction", "out")
-	return newConnection(p, conn), nil
+	return newConnection(conn, p), nil
 }
 
 // AcceptPeer awaits an incoming connection from the given peer.
@@ -141,7 +144,7 @@ func (t *TransportTCP) AcceptPeer(p *peer.Peer) (*Connection, error) {
 	if connected.err != nil {
 		return nil, connected.err
 	}
-	t.log.Debugw("connected", "id", p.ID(), "addr", connected.c.conn.RemoteAddr(), "direction", "in")
+	t.log.Debugw("connected", "id", p.ID(), "addr", connected.c.RemoteAddr(), "direction", "in")
 	return connected.c, nil
 }
 
@@ -243,7 +246,7 @@ func (t *TransportTCP) matchAccept(m *acceptMatcher, req []byte, conn net.Conn) 
 		t.closeConnection(conn)
 		return
 	}
-	m.connected <- connect{newConnection(m.peer, conn), nil}
+	m.connected <- connect{newConnection(conn, m.peer), nil}
 }
 
 func (t *TransportTCP) listenLoop() {
@@ -296,7 +299,10 @@ func (t *TransportTCP) doHandshake(key peer.PublicKey, remoteAddr string, conn n
 	}
 	b, err := proto.Marshal(pkt)
 	if err != nil {
-		return err
+		return errors.Wrap(err, ErrInvalidHandshake.Error())
+	}
+	if l := len(b); l > maxHandshakePacketSize {
+		return fmt.Errorf("handshake size too large: %d, max %d", l, maxHandshakePacketSize)
 	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(handshakeTimeout)); err != nil {
@@ -310,7 +316,7 @@ func (t *TransportTCP) doHandshake(key peer.PublicKey, remoteAddr string, conn n
 	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
 		return err
 	}
-	b = make([]byte, MaxPacketSize)
+	b = make([]byte, maxHandshakePacketSize)
 	n, err := conn.Read(b)
 	if err != nil {
 		return err
@@ -318,7 +324,7 @@ func (t *TransportTCP) doHandshake(key peer.PublicKey, remoteAddr string, conn n
 
 	pkt = new(pb.Packet)
 	if err := proto.Unmarshal(b[:n], pkt); err != nil {
-		return err
+		return errors.Wrap(err, ErrInvalidHandshake.Error())
 	}
 
 	signer, err := peer.RecoverKeyFromSignedData(pkt)
@@ -336,10 +342,10 @@ func (t *TransportTCP) readHandshakeRequest(conn net.Conn) (peer.PublicKey, []by
 	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
 		return nil, nil, err
 	}
-	b := make([]byte, MaxPacketSize)
+	b := make([]byte, maxHandshakePacketSize)
 	n, err := conn.Read(b)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, ErrInvalidHandshake.Error())
 	}
 
 	pkt := new(pb.Packet)
@@ -373,6 +379,9 @@ func (t *TransportTCP) writeHandshakeResponse(reqData []byte, conn net.Conn) err
 	b, err := proto.Marshal(pkt)
 	if err != nil {
 		return err
+	}
+	if l := len(b); l > maxHandshakePacketSize {
+		return fmt.Errorf("handshake size too large: %d, max %d", l, maxHandshakePacketSize)
 	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(handshakeTimeout)); err != nil {

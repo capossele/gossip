@@ -104,7 +104,7 @@ func TestNoHandshakeResponse(t *testing.T) {
 	go func() {
 		conn, err := lis.Accept()
 		require.NoError(t, err)
-		n, _ := conn.Read(make([]byte, MaxPacketSize))
+		n, _ := conn.Read(make([]byte, maxHandshakePacketSize))
 		assert.NotZero(t, n)
 		_ = conn.Close()
 		_ = lis.Close()
