@@ -57,7 +57,7 @@ func (m *Manager) AddInbound(p *peer.Peer) error {
 	return m.addNeighbor(p, m.trans.AcceptPeer)
 }
 
-func (m *Manager) DropNeighbor(p *peer.Peer) {
+func (m *Manager) DropNeighbor(p peer.ID) {
 	m.deleteNeighbor(p)
 }
 
@@ -176,15 +176,15 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(peer *peer.Peer) {
+func (m *Manager) deleteNeighbor(peer peer.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.neighbors[peer.ID()]; !ok {
+	if _, ok := m.neighbors[peer]; !ok {
 		return
 	}
 
-	n := m.neighbors[peer.ID()]
-	delete(m.neighbors, peer.ID())
+	n := m.neighbors[peer]
+	delete(m.neighbors, peer)
 	disconnect(n.conn)
 }
 
@@ -207,7 +207,7 @@ func (m *Manager) readLoop(nbr *neighbor) {
 				m.log.Warnw("read error", "err", err)
 			}
 			_ = nbr.conn.Close() // just make sure that the connection is closed as fast as possible
-			m.deleteNeighbor(nbr.peer)
+			m.deleteNeighbor(nbr.peer.ID())
 			m.log.Debug("reading stopped")
 			return
 		}

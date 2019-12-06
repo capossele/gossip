@@ -118,7 +118,7 @@ func TestClosedConnection(t *testing.T) {
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 
 	// A drops B
-	mgrA.deleteNeighbor(peerB)
+	mgrA.deleteNeighbor(peerB.ID())
 	time.Sleep(graceTime)
 
 	// the events should be there even before we close
