@@ -49,16 +49,19 @@ func NewManager(t *transport.TCP, log *zap.SugaredLogger, f GetTransaction) *Man
 	return m
 }
 
+// AddOutbound tries to add a neighbor by connecting to that peer.
 func (m *Manager) AddOutbound(p *peer.Peer) error {
 	return m.addNeighbor(p, m.trans.DialPeer)
 }
 
+// AddInbound tries to add a neighbor by accepting an incoming connection from that peer.
 func (m *Manager) AddInbound(p *peer.Peer) error {
 	return m.addNeighbor(p, m.trans.AcceptPeer)
 }
 
-func (m *Manager) DropNeighbor(p peer.ID) {
-	m.deleteNeighbor(p)
+// DropNeighbor disconnects the neighbor with the given ID.
+func (m *Manager) DropNeighbor(id peer.ID) {
+	m.deleteNeighbor(id)
 }
 
 func (m *Manager) Close() {
@@ -176,15 +179,15 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(peer peer.ID) {
+func (m *Manager) deleteNeighbor(id peer.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.neighbors[peer]; !ok {
+	if _, ok := m.neighbors[id]; !ok {
 		return
 	}
 
-	n := m.neighbors[peer]
-	delete(m.neighbors, peer)
+	n := m.neighbors[id]
+	delete(m.neighbors, id)
 	disconnect(n.conn)
 }
 
