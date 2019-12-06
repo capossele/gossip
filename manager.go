@@ -22,7 +22,7 @@ const (
 type GetTransaction func(txHash []byte) ([]byte, error)
 
 type Manager struct {
-	trans          *transport.TransportTCP
+	trans          *transport.TCP
 	log            *zap.SugaredLogger
 	getTransaction GetTransaction
 
@@ -38,7 +38,7 @@ type neighbor struct {
 	conn *transport.Connection
 }
 
-func NewManager(t *transport.TransportTCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
+func NewManager(t *transport.TCP, log *zap.SugaredLogger, f GetTransaction) *Manager {
 	m := &Manager{
 		trans:          t,
 		log:            log,

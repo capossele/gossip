@@ -26,7 +26,7 @@ func init() {
 	logger = l.Sugar()
 }
 
-func newTest(t require.TestingT, name string) (*TransportTCP, func()) {
+func newTest(t require.TestingT, name string) (*TCP, func()) {
 	l := logger.Named(name)
 	db := peer.NewMemoryDB(l.Named("db"))
 	local, err := peer.NewLocal("peering", name, db)
@@ -48,7 +48,7 @@ func newTest(t require.TestingT, name string) (*TransportTCP, func()) {
 	return trans, teardown
 }
 
-func getPeer(t *TransportTCP) *peer.Peer {
+func getPeer(t *TCP) *peer.Peer {
 	return &t.local.Peer
 }
 
