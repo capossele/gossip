@@ -45,9 +45,23 @@ func NewManager(t *transport.TCP, log *zap.SugaredLogger, f GetTransaction) *Man
 		getTransaction: f,
 		neighbors:      make(map[peer.ID]*neighbor),
 	}
-
 	m.running = true
 	return m
+}
+
+// AddOutbound tries to add a neighbor by connecting to that peer.
+func (m *Manager) AddOutbound(p *peer.Peer) error {
+	return m.addNeighbor(p, m.trans.DialPeer)
+}
+
+// AddInbound tries to add a neighbor by accepting an incoming connection from that peer.
+func (m *Manager) AddInbound(p *peer.Peer) error {
+	return m.addNeighbor(p, m.trans.AcceptPeer)
+}
+
+// DropNeighbor disconnects the neighbor with the given ID.
+func (m *Manager) DropNeighbor(id peer.ID) {
+	m.deleteNeighbor(id)
 }
 
 func (m *Manager) Close() {
@@ -165,15 +179,15 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(peer *peer.Peer) {
+func (m *Manager) deleteNeighbor(id peer.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.neighbors[peer.ID()]; !ok {
+	if _, ok := m.neighbors[id]; !ok {
 		return
 	}
 
-	n := m.neighbors[peer.ID()]
-	delete(m.neighbors, peer.ID())
+	n := m.neighbors[id]
+	delete(m.neighbors, id)
 	disconnect(n.conn)
 }
 
@@ -196,7 +210,7 @@ func (m *Manager) readLoop(nbr *neighbor) {
 				m.log.Warnw("read error", "err", err)
 			}
 			_ = nbr.conn.Close() // just make sure that the connection is closed as fast as possible
-			m.deleteNeighbor(nbr.peer)
+			m.deleteNeighbor(nbr.peer.ID())
 			m.log.Debug("reading stopped")
 			return
 		}

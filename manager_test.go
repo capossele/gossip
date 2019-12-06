@@ -101,13 +101,13 @@ func TestClosedConnection(t *testing.T) {
 	// B -> A
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerB)
 		assert.NoError(t, err)
 	}()
 	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		err := mgrB.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 
@@ -118,7 +118,7 @@ func TestClosedConnection(t *testing.T) {
 	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
 
 	// A drops B
-	mgrA.deleteNeighbor(peerB)
+	mgrA.DropNeighbor(peerB.ID())
 	time.Sleep(graceTime)
 
 	// the events should be there even before we close
@@ -140,13 +140,13 @@ func TestP2PSend(t *testing.T) {
 	// B -> A
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerB)
 		assert.NoError(t, err)
 	}()
 	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		err := mgrB.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 
@@ -179,13 +179,13 @@ func TestP2PSendTwice(t *testing.T) {
 	// B -> A
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerB)
 		assert.NoError(t, err)
 	}()
 	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		err := mgrB.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 
@@ -222,23 +222,23 @@ func TestBroadcast(t *testing.T) {
 	// B -> A <- C
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerB)
 		assert.NoError(t, err)
 	}()
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerC, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerC)
 		assert.NoError(t, err)
 	}()
 	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		err := mgrB.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 	go func() {
 		defer wg.Done()
-		err := mgrC.addNeighbor(peerA, mgrC.trans.DialPeer)
+		err := mgrC.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 
@@ -269,7 +269,7 @@ func TestDropUnsuccessfulAccept(t *testing.T) {
 		Peer: peerB,
 	}).Once()
 
-	err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+	err := mgrA.AddInbound(peerB)
 	assert.Error(t, err)
 }
 
@@ -288,13 +288,13 @@ func TestTxRequest(t *testing.T) {
 	// B -> A
 	go func() {
 		defer wg.Done()
-		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		err := mgrA.AddInbound(peerB)
 		assert.NoError(t, err)
 	}()
 	time.Sleep(graceTime)
 	go func() {
 		defer wg.Done()
-		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		err := mgrB.AddOutbound(peerA)
 		assert.NoError(t, err)
 	}()
 
