@@ -16,6 +16,7 @@ import (
 
 const (
 	maxConnectionAttempts = 3
+	maxPacketSize         = 2048
 )
 
 type GetTransaction func(txHash []byte) ([]byte, error)
@@ -65,7 +66,7 @@ func (m *Manager) Close() {
 	m.running = false
 	// close all connections
 	for _, n := range m.neighbors {
-		n.conn.Close()
+		_ = n.conn.Close()
 	}
 	m.mu.Unlock()
 
@@ -120,11 +121,14 @@ func (m *Manager) SendTransaction(txData []byte, to ...peer.ID) {
 }
 
 func (m *Manager) send(msg []byte, to ...peer.ID) {
+	if l := len(msg); l > maxPacketSize {
+		m.log.Errorw("message too large", "len", l, "max", maxPacketSize)
+	}
 	neighbors := m.getNeighbors(to...)
 
-	for _, n := range neighbors {
-		m.log.Debugw("Sending", "to", n.peer.ID(), "msg", msg)
-		err := n.conn.Write(msg)
+	for _, nbr := range neighbors {
+		m.log.Debugw("Sending", "to", nbr.peer.ID(), "msg", msg)
+		_, err := nbr.conn.Write(msg)
 		if err != nil {
 			m.log.Debugw("send error", "err", err)
 		}
@@ -184,12 +188,15 @@ func (m *Manager) deleteNeighbor(peer *peer.Peer) {
 	disconnect(n.conn)
 }
 
-func (m *Manager) readLoop(n *neighbor) {
+func (m *Manager) readLoop(nbr *neighbor) {
 	m.wg.Add(1)
 	defer m.wg.Done()
 
+	// create a buffer for the packages
+	b := make([]byte, maxPacketSize)
+
 	for {
-		data, err := n.conn.Read()
+		n, err := nbr.conn.Read(b)
 		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 			// ignore temporary read errors.
 			m.log.Debugw("temporary read error", "err", err)
@@ -199,14 +206,14 @@ func (m *Manager) readLoop(n *neighbor) {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 				m.log.Warnw("read error", "err", err)
 			}
-			n.conn.Close() // just make sure that the connection is closed as fast as possible
-			m.deleteNeighbor(n.peer)
+			_ = nbr.conn.Close() // just make sure that the connection is closed as fast as possible
+			m.deleteNeighbor(nbr.peer)
 			m.log.Debug("reading stopped")
 			return
 		}
 
-		if err := m.handlePacket(data, n); err != nil {
-			m.log.Warnw("failed to handle packet", "id", n.peer.ID(), "err", err)
+		if err := m.handlePacket(b[:n], nbr); err != nil {
+			m.log.Warnw("failed to handle packet", "id", nbr.peer.ID(), "err", err)
 		}
 	}
 }
@@ -259,6 +266,6 @@ func marshal(msg pb.Message) []byte {
 }
 
 func disconnect(conn *transport.Connection) {
-	conn.Close()
+	_ = conn.Close()
 	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: conn.Peer()})
 }

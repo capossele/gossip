@@ -86,6 +86,45 @@ func TestClose(t *testing.T) {
 	teardown()
 }
 
+func TestClosedConnection(t *testing.T) {
+	defer assertEvents(t)()
+
+	mgrA, closeA, peerA := newTest(t, "A")
+	defer closeA()
+	mgrB, closeB, peerB := newTest(t, "B")
+	defer closeB()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// connect in the following way
+	// B -> A
+	go func() {
+		defer wg.Done()
+		err := mgrA.addNeighbor(peerB, mgrA.trans.AcceptPeer)
+		assert.NoError(t, err)
+	}()
+	time.Sleep(graceTime)
+	go func() {
+		defer wg.Done()
+		err := mgrB.addNeighbor(peerA, mgrB.trans.DialPeer)
+		assert.NoError(t, err)
+	}()
+
+	// wait for the connections to establish
+	wg.Wait()
+
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+
+	// A drops B
+	mgrA.deleteNeighbor(peerB)
+	time.Sleep(graceTime)
+
+	// the events should be there even before we close
+	eventMock.AssertExpectations(t)
+}
+
 func TestUnicast(t *testing.T) {
 	defer assertEvents(t)()
 
