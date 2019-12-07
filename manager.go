@@ -49,6 +49,19 @@ func NewManager(t *transport.TCP, log *zap.SugaredLogger, f GetTransaction) *Man
 	return m
 }
 
+// Close stops the manager and closes all established connections.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.running = false
+	// close all connections
+	for _, n := range m.neighbors {
+		_ = n.conn.Close()
+	}
+	m.mu.Unlock()
+
+	m.wg.Wait()
+}
+
 // AddOutbound tries to add a neighbor by connecting to that peer.
 func (m *Manager) AddOutbound(p *peer.Peer) error {
 	return m.addNeighbor(p, m.trans.DialPeer)
@@ -60,20 +73,35 @@ func (m *Manager) AddInbound(p *peer.Peer) error {
 }
 
 // DropNeighbor disconnects the neighbor with the given ID.
-func (m *Manager) DropNeighbor(id peer.ID) {
-	m.deleteNeighbor(id)
+func (m *Manager) DropNeighbor(id peer.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.neighbors[id]; !ok {
+		return ErrNotANeighbor
+	}
+	n := m.neighbors[id]
+	delete(m.neighbors, id)
+	disconnect(n.conn)
+
+	return nil
 }
 
-func (m *Manager) Close() {
-	m.mu.Lock()
-	m.running = false
-	// close all connections
-	for _, n := range m.neighbors {
-		_ = n.conn.Close()
+// RequestTransaction requests the transaction with the given hash from the neighbors.
+// If no peer is provided, all neighbors are queried.
+func (m *Manager) RequestTransaction(txHash []byte, to ...peer.ID) {
+	req := &pb.TransactionRequest{
+		Hash: txHash,
 	}
-	m.mu.Unlock()
+	m.send(marshal(req), to...)
+}
 
-	m.wg.Wait()
+// SendTransaction sends the given transaction data to the neighbors.
+// If no peer is provided, it is send to all neighbors.
+func (m *Manager) SendTransaction(txData []byte, to ...peer.ID) {
+	tx := &pb.Transaction{
+		Body: txData,
+	}
+	m.send(marshal(tx), to...)
 }
 
 func (m *Manager) getNeighbors(ids ...peer.ID) []*neighbor {
@@ -106,21 +134,6 @@ func (m *Manager) getNeighborsById(ids []peer.ID) []*neighbor {
 	m.mu.RUnlock()
 
 	return result
-}
-
-func (m *Manager) RequestTransaction(txHash []byte, to ...peer.ID) {
-	req := &pb.TransactionRequest{
-		Hash: txHash,
-	}
-	m.send(marshal(req), to...)
-}
-
-// SendTransaction sends the transaction data to the given neighbors.
-func (m *Manager) SendTransaction(txData []byte, to ...peer.ID) {
-	tx := &pb.Transaction{
-		Body: txData,
-	}
-	m.send(marshal(tx), to...)
 }
 
 func (m *Manager) send(msg []byte, to ...peer.ID) {
@@ -179,18 +192,6 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	return nil
 }
 
-func (m *Manager) deleteNeighbor(id peer.ID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.neighbors[id]; !ok {
-		return
-	}
-
-	n := m.neighbors[id]
-	delete(m.neighbors, id)
-	disconnect(n.conn)
-}
-
 func (m *Manager) readLoop(nbr *neighbor) {
 	m.wg.Add(1)
 	defer m.wg.Done()
@@ -210,7 +211,7 @@ func (m *Manager) readLoop(nbr *neighbor) {
 				m.log.Warnw("read error", "err", err)
 			}
 			_ = nbr.conn.Close() // just make sure that the connection is closed as fast as possible
-			m.deleteNeighbor(nbr.peer.ID())
+			_ = m.DropNeighbor(nbr.peer.ID())
 			m.log.Debug("reading stopped")
 			return
 		}

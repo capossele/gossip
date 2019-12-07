@@ -257,6 +257,59 @@ func TestBroadcast(t *testing.T) {
 	time.Sleep(graceTime)
 }
 
+func TestSingleSend(t *testing.T) {
+	defer assertEvents(t)()
+
+	mgrA, closeA, peerA := newTest(t, "A")
+	defer closeA()
+	mgrB, closeB, peerB := newTest(t, "B")
+	defer closeB()
+	mgrC, closeC, peerC := newTest(t, "C")
+	defer closeC()
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// connect in the following way
+	// B -> A <- C
+	go func() {
+		defer wg.Done()
+		err := mgrA.AddInbound(peerB)
+		assert.NoError(t, err)
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrA.AddInbound(peerC)
+		assert.NoError(t, err)
+	}()
+	time.Sleep(graceTime)
+	go func() {
+		defer wg.Done()
+		err := mgrB.AddOutbound(peerA)
+		assert.NoError(t, err)
+	}()
+	go func() {
+		defer wg.Done()
+		err := mgrC.AddOutbound(peerA)
+		assert.NoError(t, err)
+	}()
+
+	// wait for the connections to establish
+	wg.Wait()
+
+	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+		Body: testTxData,
+		Peer: peerA,
+	}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Twice()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerC}).Once()
+
+	// A sends the transaction only to B
+	mgrA.SendTransaction(testTxData, peerB.ID())
+	time.Sleep(graceTime)
+}
+
 func TestDropUnsuccessfulAccept(t *testing.T) {
 	defer assertEvents(t)()
 
