@@ -72,7 +72,7 @@ func (m *Manager) AddInbound(p *peer.Peer) error {
 	return m.addNeighbor(p, m.trans.AcceptPeer)
 }
 
-// DropNeighbor disconnects the neighbor with the given ID.
+// NeighborDropped disconnects the neighbor with the given ID.
 func (m *Manager) DropNeighbor(id peer.ID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -166,7 +166,7 @@ func (m *Manager) addNeighbor(peer *peer.Peer, handshake func(*peer.Peer) (*tran
 	// could not add neighbor
 	if err != nil {
 		m.log.Debugw("addNeighbor failed", "peer", peer.ID(), "err", err)
-		Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: peer})
+		Events.NeighborDropped.Trigger(&NeighborDroppedEvent{Peer: peer})
 		return err
 	}
 
@@ -232,7 +232,7 @@ func (m *Manager) handlePacket(data []byte, n *neighbor) error {
 			return errors.Wrap(err, "invalid message")
 		}
 		m.log.Debugw("Received Transaction", "data", msg.GetBody())
-		Events.NewTransaction.Trigger(&NewTransactionEvent{Body: msg.GetBody(), Peer: n.peer})
+		Events.TransactionReceived.Trigger(&TransactionReceivedEvent{Body: msg.GetBody(), Peer: n.peer})
 
 	// Incoming Transaction request
 	case pb.MTransactionRequest:
@@ -271,5 +271,5 @@ func marshal(msg pb.Message) []byte {
 
 func disconnect(conn *transport.Connection) {
 	_ = conn.Close()
-	Events.DropNeighbor.Trigger(&DropNeighborEvent{Peer: conn.Peer()})
+	Events.NeighborDropped.Trigger(&NeighborDroppedEvent{Peer: conn.Peer()})
 }

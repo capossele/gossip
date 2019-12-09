@@ -27,8 +27,8 @@ var (
 	testTxData = []byte("testTx")
 )
 
-func newTransactionEvent(ev *NewTransactionEvent) { eventMock.Called(ev) }
-func dropNeighborEvent(ev *DropNeighborEvent)     { eventMock.Called(ev) }
+func transactionReceivedEvent(ev *TransactionReceivedEvent) { eventMock.Called(ev) }
+func neighborDroppedEvent(ev *NeighborDroppedEvent)         { eventMock.Called(ev) }
 
 // assertEvents initializes the mock and asserts the expectations
 func assertEvents(t *testing.T) func() {
@@ -47,9 +47,9 @@ func init() {
 	}
 	logger = l.Sugar()
 
-	// mock the events
-	Events.NewTransaction.Attach(events.NewClosure(newTransactionEvent))
-	Events.DropNeighbor.Attach(events.NewClosure(dropNeighborEvent))
+	// mock the events triggered by the gossip
+	Events.TransactionReceived.Attach(events.NewClosure(transactionReceivedEvent))
+	Events.NeighborDropped.Attach(events.NewClosure(neighborDroppedEvent))
 }
 
 func getTestTransaction([]byte) ([]byte, error) {
@@ -114,11 +114,12 @@ func TestClosedConnection(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
 
 	// A drops B
-	mgrA.DropNeighbor(peerB.ID())
+	err := mgrA.DropNeighbor(peerB.ID())
+	require.NoError(t, err)
 	time.Sleep(graceTime)
 
 	// the events should be there even before we close
@@ -153,12 +154,12 @@ func TestP2PSend(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+	eventMock.On("transactionReceivedEvent", &TransactionReceivedEvent{
 		Body: testTxData,
 		Peer: peerA,
 	}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
 
 	mgrA.SendTransaction(testTxData)
 	time.Sleep(graceTime)
@@ -192,12 +193,12 @@ func TestP2PSendTwice(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+	eventMock.On("transactionReceivedEvent", &TransactionReceivedEvent{
 		Body: testTxData,
 		Peer: peerA,
 	}).Twice()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
 
 	mgrA.SendTransaction(testTxData)
 	time.Sleep(1 * time.Second) // wait a bit between the sends, to test timeouts
@@ -245,13 +246,13 @@ func TestBroadcast(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+	eventMock.On("transactionReceivedEvent", &TransactionReceivedEvent{
 		Body: testTxData,
 		Peer: peerA,
 	}).Twice()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Twice()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerC}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Twice()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerC}).Once()
 
 	mgrA.SendTransaction(testTxData)
 	time.Sleep(graceTime)
@@ -297,13 +298,13 @@ func TestSingleSend(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+	eventMock.On("transactionReceivedEvent", &TransactionReceivedEvent{
 		Body: testTxData,
 		Peer: peerA,
 	}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Twice()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerC}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Twice()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerC}).Once()
 
 	// A sends the transaction only to B
 	mgrA.SendTransaction(testTxData, peerB.ID())
@@ -318,7 +319,7 @@ func TestDropUnsuccessfulAccept(t *testing.T) {
 	_, closeB, peerB := newTest(t, "B")
 	defer closeB()
 
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{
 		Peer: peerB,
 	}).Once()
 
@@ -354,14 +355,16 @@ func TestTxRequest(t *testing.T) {
 	// wait for the connections to establish
 	wg.Wait()
 
-	eventMock.On("newTransactionEvent", &NewTransactionEvent{
+	txHash := []byte("Hello!")
+
+	eventMock.On("transactionReceivedEvent", &TransactionReceivedEvent{
 		Body: testTxData,
 		Peer: peerB,
 	}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerA}).Once()
-	eventMock.On("dropNeighborEvent", &DropNeighborEvent{Peer: peerB}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerA}).Once()
+	eventMock.On("neighborDroppedEvent", &NeighborDroppedEvent{Peer: peerB}).Once()
 
-	b, err := proto.Marshal(&pb.TransactionRequest{Hash: []byte("Hello!")})
+	b, err := proto.Marshal(&pb.TransactionRequest{Hash: txHash})
 	require.NoError(t, err)
 	mgrA.RequestTransaction(b)
 	time.Sleep(graceTime)
