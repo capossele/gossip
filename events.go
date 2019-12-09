@@ -9,15 +9,23 @@ import (
 var Events = struct {
 	// A NewTransaction event is triggered when a new transaction is received by the gossip protocol.
 	NewTransaction *events.Event
-	DropNeighbor   *events.Event
+	// A RequestTransaction event is triggered when the given transaction is required for the solidification.
+	RequestTransaction *events.Event
+	// A DropNeighbor event is triggered when a neighbor has been dropped
+	DropNeighbor *events.Event
 }{
-	NewTransaction: events.NewEvent(newTransaction),
-	DropNeighbor:   events.NewEvent(dropNeighbor),
+	NewTransaction:     events.NewEvent(newTransaction),
+	RequestTransaction: events.NewEvent(requestTransaction),
+	DropNeighbor:       events.NewEvent(dropNeighbor),
 }
 
 type NewTransactionEvent struct {
 	Body []byte
 	Peer *peer.Peer
+}
+
+type RequestTransactionEvent struct {
+	TxHash []byte
 }
 type DropNeighborEvent struct {
 	Peer *peer.Peer
@@ -25,6 +33,10 @@ type DropNeighborEvent struct {
 
 func newTransaction(handler interface{}, params ...interface{}) {
 	handler.(func(*NewTransactionEvent))(params[0].(*NewTransactionEvent))
+}
+
+func requestTransaction(handler interface{}, params ...interface{}) {
+	handler.(func(*RequestTransactionEvent))(params[0].(*RequestTransactionEvent))
 }
 
 func dropNeighbor(handler interface{}, params ...interface{}) {
